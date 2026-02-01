@@ -1,0 +1,32 @@
+# OS / editor
+.DS_Store
+*.log
+*.tmp
+*.swp
+.idea/
+.vscode/
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# AI / planning artifacts
+.claude/
+_bmad/
+_bmad-output/
+JOJOFLIX.MD
+logo.png
+
+# Node / Flutter generated artifacts
+**/node_modules/
+**/build/
+**/.dart_tool/
+**/.gradle/
+**/Pods/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/.packages
+**/DerivedData/
+jojoflix_app/tool/

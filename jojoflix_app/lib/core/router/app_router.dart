@@ -1,0 +1,200 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+import '../auth/auth_state_provider.dart';
+import '../../features/auth/widget/login_screen.dart';
+import '../../features/profiles/widget/profiles_screen.dart';
+import '../../features/home/widget/main_scaffold.dart';
+import '../../features/home/widget/home_screen.dart';
+import '../../features/search/widget/search_screen.dart';
+import '../../features/detail/widget/detail_screen.dart';
+import '../../features/detail/widget/person_screen.dart';
+import '../../features/player/widget/player_overlay.dart';
+import '../../features/profiles/widget/profile_screen.dart';
+import '../network/api_client.dart';
+
+part 'app_router.g.dart';
+
+class AppRoutes {
+  static const String splash = '/';
+  static const String login = '/login';
+  static const String profileSelect = '/profiles/select';
+  static const String profiles = '/profiles';
+  static const String home = '/home';
+  static const String search = '/search';
+  static const String detail = '/detail/:mediaType/:tmdbId';
+  static const String person = '/person/:personId';
+  static const String player = '/player/:mediaType/:tmdbId';
+}
+
+@riverpod
+GoRouter appRouter(Ref ref) {
+  // Écouter l'état d'auth pour rafraîchir le router quand il change
+  final isAuthenticated = ref.watch(authStateProvider);
+  final prefs = ref.watch(sharedPreferencesProvider);
+
+  return GoRouter(
+    initialLocation: AppRoutes.splash,
+    debugLogDiagnostics: false,
+    redirect: (context, state) async {
+      final location = state.matchedLocation;
+      final hasActiveProfile =
+          (prefs.getString('active_profile_id') ?? '').trim().isNotEmpty;
+
+      // Routes publiques (pas besoin d'être connecté)
+      final publicRoutes = [AppRoutes.splash, AppRoutes.login];
+      final isPublic = publicRoutes.contains(location);
+
+      if (!isAuthenticated && !isPublic) {
+        return AppRoutes.login;
+      }
+
+      if (isAuthenticated &&
+          (location == AppRoutes.login || location == AppRoutes.splash)) {
+        return hasActiveProfile ? AppRoutes.home : AppRoutes.profileSelect;
+      }
+
+      if (!isPublic &&
+          location != AppRoutes.profileSelect &&
+          isAuthenticated &&
+          !hasActiveProfile) {
+        return AppRoutes.profileSelect;
+      }
+
+      return null;
+    },
+    routes: [
+      // Splash — vérifie le token et redirige
+      GoRoute(
+        path: AppRoutes.splash,
+        builder: (context, state) => const _SplashScreen(),
+      ),
+
+      GoRoute(
+        path: AppRoutes.login,
+        builder: (context, state) => const LoginScreen(),
+      ),
+
+      GoRoute(
+        path: AppRoutes.profileSelect,
+        builder: (context, state) => const ProfilesScreen(),
+      ),
+
+      // Shell avec NavigationBar/Rail
+      ShellRoute(
+        builder: (context, state, child) {
+          final location = state.matchedLocation;
+          int selectedIndex = 0;
+          if (location.startsWith('/search')) selectedIndex = 1;
+          if (location.startsWith('/profiles')) selectedIndex = 2;
+          return MainScaffold(selectedIndex: selectedIndex, child: child);
+        },
+        routes: [
+          GoRoute(
+            path: AppRoutes.home,
+            builder: (context, state) => const HomeScreen(),
+          ),
+          GoRoute(
+            path: AppRoutes.search,
+            builder: (context, state) => const SearchScreen(),
+          ),
+          GoRoute(
+            path: AppRoutes.profiles,
+            builder: (context, state) => const ProfileScreen(),
+          ),
+        ],
+      ),
+
+      GoRoute(
+        path: AppRoutes.detail,
+        builder: (context, state) {
+          final tmdbId = state.pathParameters['tmdbId']!;
+          final mediaType = state.pathParameters['mediaType']!;
+          return DetailScreen(tmdbId: tmdbId, mediaType: mediaType);
+        },
+      ),
+
+      GoRoute(
+        path: AppRoutes.person,
+        builder: (context, state) {
+          final personId =
+              int.tryParse(state.pathParameters['personId'] ?? '') ?? 0;
+          return PersonScreen(personId: personId);
+        },
+      ),
+
+      GoRoute(
+        path: AppRoutes.player,
+        builder: (context, state) {
+          final tmdbId = state.pathParameters['tmdbId']!;
+          final mediaType = state.pathParameters['mediaType']!;
+          final extra = state.extra as Map<String, dynamic>? ?? {};
+          final query = state.uri.queryParameters;
+
+          int? readInt(String key) {
+            final fromQuery = int.tryParse(query[key] ?? '');
+            if (fromQuery != null) return fromQuery;
+
+            final value = extra[key];
+            if (value is int) return value;
+            if (value is num) return value.toInt();
+            if (value is String) return int.tryParse(value);
+            return null;
+          }
+
+          return PlayerScreen(
+            tmdbId: tmdbId,
+            mediaType: mediaType,
+            profileId: readInt('profileId') ?? 0,
+            season: readInt('season'),
+            episode: readInt('episode'),
+            startPosition: readInt('startPosition') ?? 0,
+            title: extra['title'] as String?,
+            subtitle: extra['subtitle'] as String?,
+            artworkUrl: extra['artworkUrl'] as String?,
+          );
+        },
+      ),
+    ],
+  );
+}
+
+/// SplashScreen : affiche le logo pendant la vérification du token,
+/// puis go_router redirect prend le relais automatiquement.
+class _SplashScreen extends ConsumerWidget {
+  const _SplashScreen();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final isAuthenticated = ref.watch(authStateProvider);
+    final prefs = ref.watch(sharedPreferencesProvider);
+    final hasActiveProfile =
+        (prefs.getString('active_profile_id') ?? '').trim().isNotEmpty;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (context.mounted) {
+        context.go(
+          isAuthenticated
+              ? (hasActiveProfile ? AppRoutes.home : AppRoutes.profileSelect)
+              : AppRoutes.login,
+        );
+      }
+    });
+
+    return const Scaffold(
+      backgroundColor: Color(0xFF141414),
+      body: Center(
+        child: Text(
+          'JOJOFLIX',
+          style: TextStyle(
+            fontSize: 36,
+            fontWeight: FontWeight.w900,
+            color: Color(0xFFE50914),
+            letterSpacing: 4,
+          ),
+        ),
+      ),
+    );
+  }
+}

@@ -1,0 +1,53 @@
+name: Windows Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Enable Windows desktop
+        working-directory: jojoflix_app
+        run: flutter config --enable-windows-desktop
+
+      - name: Install dependencies
+        working-directory: jojoflix_app
+        run: flutter pub get
+
+      - name: Build Windows release
+        working-directory: jojoflix_app
+        run: flutter build windows --release
+
+      - name: Archive Windows release
+        shell: pwsh
+        run: |
+          $buildDir = "jojoflix_app/build/windows/x64/runner/Release"
+          if (!(Test-Path $buildDir)) {
+            throw "Build output not found: $buildDir"
+          }
+          $artifactDir = "artifacts"
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          $artifactPath = Join-Path $artifactDir "jojoflix-windows-release.zip"
+          if (Test-Path $artifactPath) {
+            Remove-Item $artifactPath -Force
+          }
+          Compress-Archive -Path "$buildDir/*" -DestinationPath $artifactPath
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jojoflix-windows-release
+          path: artifacts/jojoflix-windows-release.zip
+          if-no-files-found: error
+          retention-days: 14
