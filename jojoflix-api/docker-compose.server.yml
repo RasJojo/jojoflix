@@ -45,3 +45,4 @@ services:
 volumes:
   jojoflix_postgres_data:
   jojoflix_redis_data:
+# Server config
