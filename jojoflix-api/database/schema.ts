@@ -134,3 +134,4 @@ export class WatchHistorySchema extends BaseModel {
   @column.dateTime({ autoCreate: true, autoUpdate: true })
   declare updatedAt: DateTime | null
 }
+// Schema
