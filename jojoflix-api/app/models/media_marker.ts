@@ -25,3 +25,4 @@ export default class MediaMarker extends BaseModel {
   @column.dateTime({ autoCreate: true, autoUpdate: true })
   declare updatedAt: DateTime
 }
+// Markers
