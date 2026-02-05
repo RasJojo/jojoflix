@@ -42,3 +42,4 @@ export default class WatchHistory extends BaseModel {
   @belongsTo(() => Profile)
   declare profile: BelongsTo<typeof Profile>
 }
+// Watch history
