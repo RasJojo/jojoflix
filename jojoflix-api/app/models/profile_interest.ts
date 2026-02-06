@@ -30,3 +30,4 @@ export default class ProfileInterest extends BaseModel {
   @belongsTo(() => Profile)
   declare profile: BelongsTo<typeof Profile>
 }
+// Interests
