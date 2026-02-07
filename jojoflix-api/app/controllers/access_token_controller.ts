@@ -33,3 +33,4 @@ export default class AccessTokenController {
     })
   }
 }
+// Auth controller
