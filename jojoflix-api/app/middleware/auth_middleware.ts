@@ -38,3 +38,4 @@ export default class AuthMiddleware {
     return next()
   }
 }
+// Auth middleware
