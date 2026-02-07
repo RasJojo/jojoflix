@@ -69,3 +69,4 @@ export default class MediaController {
     return response.ok({ data: results })
   }
 }
+// Media
