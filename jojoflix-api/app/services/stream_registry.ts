@@ -268,3 +268,4 @@ export default class StreamRegistry {
     return Date.now() - lastActivityAt > STREAM_ACTIVE_WINDOW_SECONDS * 1000
   }
 }
+// Registry
