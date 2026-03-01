@@ -22,3 +22,4 @@ extension AuthStateInvalidation on WidgetRef {
 extension AuthStateInvalidationRef on Ref {
   void invalidateAuth() => invalidate(authStateProvider);
 }
+// Auth provider
