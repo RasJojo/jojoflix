@@ -461,3 +461,4 @@ class _WatchlistCard extends StatelessWidget {
     );
   }
 }
+// Profile
