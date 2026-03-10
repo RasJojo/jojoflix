@@ -679,3 +679,4 @@ class _EpisodeTile extends StatelessWidget {
     );
   }
 }
+// Detail
