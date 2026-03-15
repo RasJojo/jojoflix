@@ -2075,3 +2075,6 @@ class _SubtitleChoice {
           openSubtitle: entry,
         );
 }
+// Video player with streaming and subtitle support
+// Implements gesture controls, picture-in-picture, and auto-play
+// Handles Real-Debrid streaming proxy and multiple source fallbacks
