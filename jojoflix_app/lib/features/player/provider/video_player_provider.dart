@@ -1155,3 +1155,4 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
     _player.dispose();
   }
 }
+// PiP
