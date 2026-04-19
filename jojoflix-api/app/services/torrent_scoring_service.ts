@@ -781,3 +781,4 @@ export default class TorrentScoringService {
     return trimmed.endsWith('/manifest.json') ? trimmed.slice(0, -'/manifest.json'.length) : trimmed
   }
 }
+// Improved VOSTFR ranking, SubSense integration, DramaYo slow path
