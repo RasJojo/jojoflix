@@ -15,247 +15,165 @@ JojoFlix est une suite complète pour découvrir et regarder du contenu multimé
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ Architecture Système
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        CLIENT APPLICATIONS                      │
-├──────────┬──────────┬──────────┬──────────┬──────────────────────┤
-│ Android  │   iOS    │  macOS   │ Web(Ng) │ Windows (minimal)   │
-│ (mobile) │ (mobile) │ (desktop)│ (web)   │                    │
-└────┬─────┴────┬─────┴────┬─────┴────┬────┴─────────────┬────────┘
-     │          │          │          │                  │
-     │   All built with Flutter + Riverpod + go_router   │
-     │                                                   │
-     └─────────────────────┬──────────────────────────────┘
-                           │ HTTPS/Bearer Token
-     ┌─────────────────────▼──────────────────────────────┐
-     │       NGINX REVERSE PROXY (Port 80/443)           │
-     │  • Static web serve • API proxy • SSL termination  │
-     └──────────┬──────────────────────────────┬──────────┘
-                │                              │
-     ┌──────────▼────────────┐    ┌────────────▼──────────┐
-     │   API Backend         │    │  External Services   │
-     │  (Port 3333)          │    │                      │
-     │                       │    │ • TMDB API           │
-     │ AdonisJS v6 + ESM    │    │ • Real-Debrid        │
-     │ Node 24              │    │ • SubSense           │
-     │                       │    │ • MediaFusion        │
-     │ Controllers:          │    │ • Torrentio          │
-     │ • /auth              │    │                      │
-     │ • /media             │    └────────────────────────┘
-     │ • /progress          │
-     │ • /streaming         │
-     │ • /subtitles         │
-     │ • /search            │
-     │                       │
-     └──────────┬────────────┘
-                │
-    ┌───────────┴──────────────┬────────────┐
-    │                          │            │
-┌───▼────────────┐   ┌────────▼──┐   ┌────▼─────────┐
-│   PostgreSQL   │   │   Redis   │   │ File System  │
-│    Database    │   │   Cache   │   │ (Subtitles)  │
-│                │   │           │   │              │
-│ • Users        │   │ • Session │   │ • .vtt files │
-│ • Profiles     │   │ • Streams │   │ • Metadata   │
-│ • Watched      │   │ • Cached  │   │              │
-│ • Markers      │   │   Data    │   │              │
-└────────────────┘   └───────────┘   └──────────────┘
+```mermaid
+graph TB
+    subgraph clients["📱 Client Applications"]
+        android["Android<br/>(Mobile)"]
+        ios["iOS<br/>(Mobile)"]
+        macos["macOS<br/>(Desktop)"]
+        web["Web<br/>(Nginx)"]
+        windows["Windows<br/>(Minimal)"]
+    end
+    
+    clients -->|"HTTPS<br/>Bearer Token"| nginx["🔀 NGINX Reverse Proxy<br/>Port 80/443"]
+    
+    subgraph backend["⚙️ Backend Services"]
+        api["API AdonisJS v6<br/>Port 3333<br/><br/>Controllers:<br/>• /auth<br/>• /media<br/>• /progress<br/>• /streaming<br/>• /subtitles"]
+    end
+    
+    subgraph external["🌐 External Services"]
+        tmdb["TMDB API<br/>Metadata"]
+        rd["Real-Debrid<br/>Streaming Proxy"]
+        subsense["SubSense<br/>Subtitles"]
+        mediafusion["MediaFusion<br/>Torrent Sources"]
+    end
+    
+    nginx --> api
+    api --> tmdb
+    api --> rd
+    api --> subsense
+    api --> mediafusion
+    
+    subgraph storage["💾 Data Layer"]
+        postgres["PostgreSQL<br/>Database<br/><br/>• Users<br/>• Profiles<br/>• Watch History<br/>• Markers"]
+        redis["Redis Cache<br/><br/>• Sessions<br/>• Streams<br/>• Cached Data"]
+        filesystem["File System<br/><br/>• Subtitles .vtt<br/>• Metadata"]
+    end
+    
+    api --> postgres
+    api --> redis
+    api --> filesystem
+    
+    style clients fill:#e1f5ff
+    style backend fill:#f3e5f5
+    style external fill:#e8f5e9
+    style storage fill:#fff3e0
 ```
 
 ---
 
-## 📊 Flux de données
+## 📊 Flux de Données
 
 ### 1️⃣ Authentication Flow
-```
-User (App)
-    │
-    ├─ POST /auth/register
-    │   {email, password}
-    │
-    ├─ POST /auth/login
-    │   {email, password}
-    │
-    ▼
-API Backend
-    │
-    ├─ Hash password (bcrypt)
-    ├─ Create AccessToken (opaque, DB-stored)
-    ├─ Create Session (Redis)
-    │
-    ▼
-Response + Bearer Token
-    │
-    ├─ Store in secure storage
-    ├─ Use in Authorization header
-    │
-    ▼
-All subsequent requests include token ✅
+
+```mermaid
+sequenceDiagram
+    participant User as User (App)
+    participant API as API Backend
+    participant DB as PostgreSQL
+    participant Redis as Redis
+    
+    User->>API: POST /auth/login<br/>{email, password}
+    API->>DB: Query user by email
+    DB-->>API: User record
+    API->>API: Verify password (bcrypt)
+    API->>DB: Create AccessToken
+    DB-->>API: Token stored
+    API->>Redis: Store session<br/>TTL: 7 days
+    Redis-->>API: ✅ Cached
+    API-->>User: Bearer Token<br/>+ User Data
+    Note over User: Store in secure storage<br/>Include in all requests
 ```
 
 ### 2️⃣ Media Discovery Flow
-```
-User opens Home Screen
-    │
-    ▼
-App calls GET /api/home
-    │ + Bearer Token
-    ├─ Fetch continue_watching (user profile)
-    │
-    ▼
-API Backend
-    │
-    ├─ Query DB: watch_history for active profile
-    ├─ For each item: enrich with TMDB metadata
-    │  (title, poster, backdrop, rating)
-    │
-    ├─ Redis Cache: store 5-minute TTL
-    │
-    ▼
-Return: {
-  continueWatching: [
-    {
-      tmdbId: 12345,
-      title: "Breaking Bad S2E5",
-      poster: "...",
-      progress: 34%,
-      watchedAt: "2026-04-20"
-    }
-  ],
-  trending: [...],
-  recommendations: [...]
-}
-    │
-    ▼
-App renders with Hero animations ✅
+
+```mermaid
+sequenceDiagram
+    participant User as User (App)
+    participant API as API Backend
+    participant Redis as Redis Cache
+    participant DB as PostgreSQL
+    participant TMDB as TMDB API
+    
+    User->>API: GET /api/home<br/>+ Bearer Token
+    API->>Redis: Check cache
+    alt Cached (TTL valid)
+        Redis-->>API: Return cached data
+        API-->>User: ✅ Fast response
+    else Cache miss
+        API->>DB: Query watch_history<br/>for active profile
+        DB-->>API: Raw records
+        API->>TMDB: Enrich with metadata<br/>(poster, backdrop, rating)
+        TMDB-->>API: Enhanced data
+        API->>Redis: Cache 5 minutes TTL
+        API-->>User: {continueWatching, trending}
+    end
 ```
 
 ### 3️⃣ Streaming & Source Selection Flow
-```
-User clicks play on media
-    │
-    ▼
-App calls GET /api/streaming/sources/{mediaId}
-    │ + bearer token
-    │
-    ▼
-API Backend
-    │
-    ├─ Query Redis: cached sources (if available)
-    │  if (cached && fresh) return sources
-    │
-    ├─ Fetch from MediaFusion/Torrentio:
-    │  GET https://provider.com/search?keyword=Breaking+Bad+S2E5
-    │
-    ├─ Receive torrent streams:
-    │  {
-    │    "magnet": "magnet:?xt=...",
-    │    "title": "[1080p] Breaking Bad S02E05",
-    │    "seeders": 450,
-    │    "type": "movie"
-    │  }
-    │
-    ├─ Score & Rank each source:
-    │  • Language detection (FR > ENG > OTHER)
-    │  • VOSTFR boost (subtitled FR)
-    │  • Quality parsing (1080p > 720p > 480p)
-    │  • Seed count weight
-    │  • Provider reputation
-    │  • Explicit label detection
-    │
-    ├─ Request Real-Debrid stream URL:
-    │  POST https://api.real-debrid.com/rest/1.0/unrestrict/link
-    │  {link: "magnet:?xt=..."}
-    │
-    ├─ Receive direct HTTP stream:
-    │  {
-    │    "filename": "Breaking.Bad.S02E05.1080p.mkv",
-    │    "link": "https://rd-stream-12345.realdebrid.com/...",
-    │    "filesize": 2147483648,
-    │    "duration": 2700
-    │  }
-    │
-    ├─ Fetch subtitles via SubSense:
-    │  GET https://subsense-api.com/api/subtitles
-    │  {query: "Breaking Bad S2E5", languages: ["fr", "en"]}
-    │
-    ├─ Cache everything in Redis (1 hour TTL)
-    │
-    ▼
-Return sources with metadata:
-{
-  sources: [
-    {
-      id: "1080p-fr-vostfr",
-      title: "[1080p] Breaking Bad - S2E5 - VOSTFR",
-      quality: "1080p",
-      language: "VOSTFR",
-      streamUrl: "https://rd-stream.../file.mkv",
-      seeders: 450,
-      subtitles: [
-        {lang: "fr", url: "https://subtitle-store/...vtt"}
-      ]
-    },
-    {id: "720p-en", ...},
-    ...
-  ]
-}
-    │
-    ▼
-App selects best source + subtitles
-    │
-    ├─ POST /api/streaming/play/{sourceId}
-    │  Register in StreamRegistry (prevent concurrent plays)
-    │
-    ▼
-App initializes media_kit player
-    │
-    ├─ Load stream URL from Real-Debrid
-    ├─ Load subtitles VTT
-    ├─ Restore position from DB
-    │
-    ▼
-User watches content ✅
-    │
-    ├─ Every 10 seconds: sync progress
-    │  POST /api/progress/update
-    │  {mediaId, position: 1200, duration: 2700}
-    │
-    ▼
-On video end
-    │
-    ├─ Mark as watched
-    ├─ Record in watch_history
-    ├─ Trigger recommendations engine
-    │
-    ▼
-Complete ✅
+
+```mermaid
+graph LR
+    A["🎬 User Clicks Play"] -->|GET /streaming/sources| B["API Backend"]
+    
+    B --> C{Redis Cache?}
+    C -->|Hit| D["Return cached<br/>sources"]
+    C -->|Miss| E["Fetch Torrents<br/>MediaFusion/Torrentio"]
+    
+    E --> F["📊 Score & Rank<br/>Algorithm"]
+    F --> F1["Quality Boost<br/>1080p: +25%"]
+    F --> F2["Language Boost<br/>VOSTFR: +35%"]
+    F --> F3["Seeders Score<br/>+25%"]
+    F --> F4["Reputation<br/>+15%"]
+    
+    F1 & F2 & F3 & F4 --> G["🎯 Ranked Sources"]
+    
+    G --> H["Real-Debrid<br/>Stream Proxy"]
+    H --> I["Get Direct URL<br/>+ Duration"]
+    
+    I --> J["SubSense<br/>Subtitles"]
+    J --> K["Cache All<br/>1 hour TTL"]
+    
+    K --> L["Return to App<br/>Best source selected"]
+    D --> L
+    
+    L --> M["📱 App<br/>Initializes Player"]
+    
+    style A fill:#e1f5ff
+    style G fill:#f3e5f5
+    style H fill:#fff3e0
+    style M fill:#e8f5e9
 ```
 
-### 4️⃣ Progress & Watchlist Flow
-```
-User bookmarks episode / marks as watched
-    │
-    ▼
-App POST /api/progress/sync
-    │ {
-    │   mediaId: 12345,
-    │   position: 1200,
-    │   duration: 2700,
-    │   watched: true
-    │ }
-    │
-    ▼
-API Backend
-    │
-    ├─ Create/update watch_history record
-    ├─ Invalidate Redis cache (continue_watching)
-    ├─ Trigger recommendation recalc
-    │
-    ▼
-Sync to all devices ✅
+### 4️⃣ Intelligent Ranking Algorithm
+
+```mermaid
+graph TD
+    A["Torrent Source"] --> B["Extract Metadata"]
+    B --> B1["Resolution<br/>1080p, 720p, etc"]
+    B --> B2["Language<br/>FR, ENG, etc"]
+    B --> B3["Seeders<br/>Count"]
+    B --> B4["Explicit Labels<br/>Detect"]
+    
+    B1 --> C["🧮 Calculate Score"]
+    B2 --> C
+    B3 --> C
+    B4 --> C
+    
+    C --> D["Score = <br/>quality×0.25 +<br/>language×0.35 +<br/>seeders×0.25 +<br/>reputation×0.15"]
+    
+    D --> E{Score > 7?}
+    E -->|YES| F["✅ Recommended<br/>Show to user"]
+    E -->|NO| G["❌ Hidden<br/>Fallback option"]
+    
+    F --> H["[1080p VOSTFR]<br/>Score: 8.5"]
+    G --> I["[720p ENG]<br/>Score: 7.2"]
+    
+    style C fill:#f3e5f5
+    style H fill:#c8e6c9
+    style I fill:#ffccbc
 ```
 
 ---
@@ -276,15 +194,45 @@ Sync to all devices ✅
 
 ### App Components
 
-| Composant | Rôle |
-|-----------|------|
-| `LoginScreen` | Auth email/password + toggle register |
-| `ProfilesScreen` | Sélection profil, création, suppression |
-| `HomeScreen` | Hero banner, continue watching, trending |
-| `DetailScreen` | Backdrop, cast, saisons/épisodes, progression |
-| `PlayerScreen` | Media_kit player avec contrôles gestuels |
-| `PlayerOverlay` | Contrôles volume/brightness, skip intro |
-| `SearchScreen` | Recherche TMDB multi-type (movie/tv/person) |
+```mermaid
+graph TD
+    subgraph screens["📱 Screens"]
+        login["LoginScreen<br/>Email/Password<br/>+ Toggle Register"]
+        profiles["ProfilesScreen<br/>Select/Create<br/>Profile"]
+        home["HomeScreen<br/>Hero Banner<br/>Continue Watching<br/>Trending"]
+        detail["DetailScreen<br/>Backdrop<br/>Cast<br/>Seasons/Episodes"]
+        player["PlayerScreen<br/>media_kit player<br/>Gesture controls<br/>PiP mode"]
+        search["SearchScreen<br/>TMDB Search<br/>Multi-type"]
+    end
+    
+    subgraph providers["🔄 State Providers"]
+        auth["authStateProvider<br/>Token + User"]
+        profile["profileProvider<br/>Active Profile"]
+        player_state["videoPlayerProvider<br/>Playback State"]
+    end
+    
+    subgraph repos["💾 Repositories"]
+        auth_repo["authRepository"]
+        detail_repo["detailRepository"]
+        source_repo["sourceRepository"]
+        progress_repo["progressRepository"]
+    end
+    
+    login --> auth
+    profiles --> profile
+    home --> profile
+    detail --> player
+    search --> detail
+    
+    auth --> auth_repo
+    detail --> detail_repo
+    player --> source_repo
+    player --> progress_repo
+    
+    style screens fill:#e1f5ff
+    style providers fill:#f3e5f5
+    style repos fill:#fff3e0
+```
 
 ---
 
@@ -292,7 +240,6 @@ Sync to all devices ✅
 
 ### Prerequis
 ```bash
-# Vérifier les versions
 node -v         # v24+
 docker -v       # latest
 flutter -v      # 3.22+
@@ -452,51 +399,42 @@ flutter test --coverage
 
 Chaque utilisateur peut avoir **plusieurs profils** (comme Netflix):
 
-```
-User (account owner)
-  │
-  ├─ Profile "Moi" (watch_history indépendante)
-  ├─ Profile "Partner" (regarde en parallèle)
-  └─ Profile "Kids" (contenu filtré)
-
-Lors du login → sélection profil
-→ Toutes les données ensuite scopées au profil
-```
-
-### Ranking des sources
-
-L'algorithme évalue chaque torrent:
-
-```
-Score = (
-  quality_boost[resolution] * 0.25 +
-  language_boost[language] * 0.35 +
-  seeders_score[count] * 0.25 +
-  provider_reputation * 0.15
-)
-
-Exemple:
-[1080p VOSTFR] 450 seeders → Score: 8.5 ⭐ (sélectionné)
-[720p ENG] 1200 seeders → Score: 7.2
-[480p] 50 seeders → Score: 4.1
+```mermaid
+graph LR
+    A["User Account"] --> B["Profile 1<br/>Moi"]
+    A --> C["Profile 2<br/>Partner"]
+    A --> D["Profile 3<br/>Kids<br/>Filtré"]
+    
+    B --> E["watch_history<br/>indépendante"]
+    C --> F["watch_history<br/>indépendante"]
+    D --> G["watch_history<br/>indépendante"]
+    
+    E --> H["Recommandations<br/>personnalisées"]
+    F --> H
+    G --> H
+    
+    style A fill:#f3e5f5
+    style B fill:#c8e6c9
+    style C fill:#c8e6c9
+    style D fill:#ffccbc
 ```
 
-### Sous-titres & Pistes audio
+### Système de caching
 
-SubSense détecte automatiquement et mappe les pistes:
-
-```
-Torrent: "Breaking.Bad.S02E05.MULTi.1080p.mkv"
-  Audio tracks: [fra, eng, ita]
-  Subtitle tracks: [fra, eng]
-
-SubSense query:
-  → Search "Breaking Bad S2E5"
-  → Match source metadata
-  → Provide: [FR.srt, EN.srt, etc]
-
-App reconciles:
-  → Play eng audio + fr subs (user pref)
+```mermaid
+graph TD
+    A["Request"] --> B{In Redis Cache?}
+    B -->|YES| C{TTL valid?}
+    C -->|YES| D["Return cached<br/>✅ Fast"]
+    C -->|NO| E["Delete stale<br/>Fetch fresh"]
+    B -->|NO| E
+    E --> F["Process request<br/>⚙️ Compute"]
+    F --> G["Store in Redis<br/>with TTL"]
+    G --> H["Return to client"]
+    D --> H
+    
+    style D fill:#c8e6c9
+    style H fill:#e1f5ff
 ```
 
 ---
@@ -508,7 +446,7 @@ App reconciles:
 | **Login échoue** | Vérifier API_BASE_URL au build, certificat SSL, backend running |
 | **Pas de sources** | Vérifier Real-Debrid API key, quota atteint? |
 | **Subtitles manquent** | Vérifier SubSense API key, language code |
-| **Lag lecteur** | Réduire qualité source, vérifier bande passante, codec incompatible? |
+| **Lag lecteur** | Réduire qualité source, vérifier bande passante |
 | **Crash au démarrage** | `flutter clean` puis rebuild, version Flutter à jour? |
 
 ---
