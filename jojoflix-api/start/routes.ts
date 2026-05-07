@@ -17,7 +17,6 @@ import TranscodeController from '#controllers/transcode_controller'
 import SubtitlesController from '#controllers/subtitles_controller'
 import ProgressController from '#controllers/progress_controller'
 import MediaController from '#controllers/media_controller'
-import MonitoringController from '#controllers/monitoring_controller'
 import PeopleController from '#controllers/people_controller'
 import WatchlistController from '#controllers/watchlist_controller'
 
@@ -119,8 +118,5 @@ router
     // ── Progress ──────────────────────────────────────────────────────────────
     router.get('progress/:mediaType/:tmdbId', [ProgressController, 'show']).use(middleware.auth())
     router.post('progress/sync', [ProgressController, 'sync']).use(middleware.auth())
-
-    // ── Monitoring ────────────────────────────────────────────────────────────
-    router.get('monitoring/overview', [MonitoringController, 'overview']).use(middleware.auth())
   })
   .prefix('/api')

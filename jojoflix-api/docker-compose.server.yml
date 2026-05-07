@@ -1,48 +1,68 @@
+networks:
+  caddy:
+    external: true
 services:
-  db:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_DB: ${DB_DATABASE}
-    volumes:
-      - jojoflix_postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_DATABASE}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
-    volumes:
-      - jojoflix_redis_data:/data
-    healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD} ping | grep PONG"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   api:
-    container_name: jojoflix-api
     build:
       context: .
       dockerfile: Dockerfile
-    restart: unless-stopped
-    env_file:
-      - .env
+    container_name: jojoflix-api
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
-    ports:
-      - "3333:3333"
-
+    env_file:
+    - .env
+    image: jojoflix-api-api:v3
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.jojoflix.rule: "Host(`jojoflixapi.jojoserv.com`)"
+      traefik.http.routers.jojoflix.entrypoints: "websecure"
+      traefik.http.routers.jojoflix.tls.certresolver: "letsencrypt"
+      traefik.http.services.jojoflix.loadbalancer.server.port: "3333"
+      traefik.docker.network: "caddy"
+    networks:
+    - caddy
+    restart: unless-stopped
+  db:
+    environment:
+      POSTGRES_DB: ${DB_DATABASE}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_USER: ${DB_USER}
+    healthcheck:
+      interval: 10s
+      retries: 5
+      test:
+      - CMD-SHELL
+      - pg_isready -U ${DB_USER} -d ${DB_DATABASE}
+      timeout: 5s
+    image: postgres:16-alpine
+    networks:
+    - caddy
+    restart: unless-stopped
+    volumes:
+    - jojoflix_postgres_data:/var/lib/postgresql/data
+  redis:
+    command:
+    - redis-server
+    - --appendonly
+    - 'yes'
+    - --requirepass
+    - ${REDIS_PASSWORD}
+    healthcheck:
+      interval: 10s
+      retries: 5
+      test:
+      - CMD-SHELL
+      - redis-cli -a ${REDIS_PASSWORD} ping | grep PONG
+      timeout: 5s
+    image: redis:7-alpine
+    networks:
+    - caddy
+    restart: unless-stopped
+    volumes:
+    - jojoflix_redis_data:/data
 volumes:
-  jojoflix_postgres_data:
-  jojoflix_redis_data:
-# Server config
+  jojoflix_postgres_data: null
+  jojoflix_redis_data: null
