@@ -1,0 +1,54 @@
+name: Linux Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libmpv-dev
+
+      - name: Enable Linux desktop
+        working-directory: jojoflix_app
+        run: flutter config --enable-linux-desktop
+
+      - name: Install dependencies
+        working-directory: jojoflix_app
+        run: flutter pub get
+
+      - name: Build Linux release
+        working-directory: jojoflix_app
+        run: flutter build linux --release
+
+      - name: Archive Linux release
+        run: |
+          BUILD_DIR="jojoflix_app/build/linux/x64/release/bundle"
+          if [ ! -d "$BUILD_DIR" ]; then
+            echo "Build output not found: $BUILD_DIR"
+            exit 1
+          fi
+          mkdir -p artifacts
+          cd "$BUILD_DIR"
+          zip -r "$GITHUB_WORKSPACE/artifacts/Jojoflix-Linux-x64.zip" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Jojoflix-Linux-x64
+          path: artifacts/Jojoflix-Linux-x64.zip
+          if-no-files-found: error
+          retention-days: 14
