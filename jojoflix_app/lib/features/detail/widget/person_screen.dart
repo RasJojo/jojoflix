@@ -27,7 +27,6 @@ class PersonScreen extends ConsumerWidget {
           return CustomScrollView(
             slivers: [
               SliverAppBar(
-                expandedHeight: 320,
                 pinned: true,
                 backgroundColor: AppColors.background,
                 leading: IconButton(
@@ -40,27 +39,85 @@ class PersonScreen extends ConsumerWidget {
                     }
                   },
                 ),
-                flexibleSpace: FlexibleSpaceBar(
-                  background: Stack(
-                    fit: StackFit.expand,
+                title: Text(
+                  person.name,
+                  style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.all(AppSpacing.lg),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      if (person.profileUrl != null)
-                        CachedNetworkImage(
-                          imageUrl: person.profileUrl!,
-                          fit: BoxFit.cover,
-                        )
-                      else
-                        Container(color: AppColors.surface),
-                      DecoratedBox(
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            begin: Alignment.topCenter,
-                            end: Alignment.bottomCenter,
-                            colors: [
-                              Colors.black.withValues(alpha: 0.12),
-                              AppColors.background,
+                      // Photo portrait
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: SizedBox(
+                          width: 120,
+                          height: 180,
+                          child: person.profileUrl != null
+                              ? CachedNetworkImage(
+                                  imageUrl: person.profileUrl!,
+                                  fit: BoxFit.cover,
+                                  width: 120,
+                                  height: 180,
+                                )
+                              : Container(
+                                  color: AppColors.surface,
+                                  child: const Icon(
+                                    Icons.person,
+                                    color: AppColors.textSecondary,
+                                    size: 48,
+                                  ),
+                                ),
+                        ),
+                      ),
+                      const SizedBox(width: AppSpacing.md),
+                      // Infos à droite
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              person.name,
+                              style: const TextStyle(
+                                color: AppColors.textPrimary,
+                                fontSize: 22,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            const SizedBox(height: AppSpacing.sm),
+                            Wrap(
+                              spacing: AppSpacing.xs,
+                              runSpacing: AppSpacing.xs,
+                              children: [
+                                if ((person.knownForDepartment ?? '').isNotEmpty)
+                                  _InfoChip(label: person.knownForDepartment!),
+                                if ((person.birthday ?? '').isNotEmpty)
+                                  _InfoChip(label: person.birthday!),
+                                if ((person.placeOfBirth ?? '').isNotEmpty)
+                                  _InfoChip(label: person.placeOfBirth!),
+                              ],
+                            ),
+                            if ((person.biography ?? '').trim().isNotEmpty) ...[
+                              const SizedBox(height: AppSpacing.sm),
+                              Text(
+                                person.biography!,
+                                maxLines: 7,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: AppColors.textSecondary,
+                                  fontSize: 13,
+                                  height: 1.45,
+                                ),
+                              ),
                             ],
-                          ),
+                          ],
                         ),
                       ),
                     ],
@@ -71,55 +128,17 @@ class PersonScreen extends ConsumerWidget {
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(
                     AppSpacing.lg,
-                    AppSpacing.lg,
+                    AppSpacing.xs,
                     AppSpacing.lg,
                     AppSpacing.md,
                   ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        person.name,
-                        style: const TextStyle(
-                          color: AppColors.textPrimary,
-                          fontSize: 30,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                      const SizedBox(height: AppSpacing.sm),
-                      Wrap(
-                        spacing: AppSpacing.sm,
-                        runSpacing: AppSpacing.sm,
-                        children: [
-                          if ((person.knownForDepartment ?? '').isNotEmpty)
-                            _InfoChip(label: person.knownForDepartment!),
-                          if ((person.birthday ?? '').isNotEmpty)
-                            _InfoChip(label: person.birthday!),
-                          if ((person.placeOfBirth ?? '').isNotEmpty)
-                            _InfoChip(label: person.placeOfBirth!),
-                        ],
-                      ),
-                      if ((person.biography ?? '').trim().isNotEmpty) ...[
-                        const SizedBox(height: AppSpacing.lg),
-                        Text(
-                          person.biography!,
-                          style: const TextStyle(
-                            color: AppColors.textSecondary,
-                            fontSize: 14,
-                            height: 1.5,
-                          ),
-                        ),
-                      ],
-                      const SizedBox(height: AppSpacing.xl),
-                      const Text(
-                        'Filmographie',
-                        style: TextStyle(
-                          color: AppColors.textPrimary,
-                          fontSize: 20,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ],
+                  child: const Text(
+                    'Filmographie',
+                    style: TextStyle(
+                      color: AppColors.textPrimary,
+                      fontSize: 20,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
                 ),
               ),
