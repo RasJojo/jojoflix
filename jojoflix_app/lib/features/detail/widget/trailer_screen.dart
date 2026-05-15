@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
-import 'package:youtube_explode_dart/youtube_explode_dart.dart' hide Video;
+import 'package:youtube_explode_dart/youtube_explode_dart.dart' hide Video, VideoId;
 import '../../../core/theme/app_theme.dart';
 import '../../../core/widget/jojoflix_loader.dart';
 
@@ -29,6 +29,7 @@ class _TrailerScreenState extends State<TrailerScreen> {
   String? _error;
   bool _overlayVisible = true;
   Timer? _hideTimer;
+  YoutubeExplode? _yt;
 
   bool _playing = false;
   Duration _position = Duration.zero;
@@ -54,14 +55,25 @@ class _TrailerScreenState extends State<TrailerScreen> {
   }
 
   Future<void> _loadTrailer() async {
-    final yt = YoutubeExplode();
+    _yt = YoutubeExplode();
     try {
-      final manifest =
-          await yt.videos.streamsClient.getManifest(widget.trailerKey);
-      final streams = manifest.muxed.toList()
-        ..sort((a, b) => a.bitrate.compareTo(b.bitrate));
-      if (streams.isEmpty) throw Exception('no_stream');
-      await _player.open(Media(streams.last.url.toString()));
+      // Essayer plusieurs clients YouTube (le client par défaut androidSdkless
+      // est souvent bloqué pour les trailers officiels avec restriction d'âge)
+      final manifest = await _yt!.videos.streamsClient.getManifest(
+        widget.trailerKey,
+        ytClients: [
+          YoutubeApiClient.androidVr,
+          YoutubeApiClient.tv,
+          YoutubeApiClient.ios,
+          YoutubeApiClient.android,
+        ],
+        requireWatchPage: false,
+      );
+
+      // Muxed en priorité (audio+vidéo intégrés), sinon erreur
+      if (manifest.muxed.isEmpty) throw Exception('no_muxed_stream');
+      final stream = manifest.muxed.withHighestBitrate();
+      await _player.open(Media(stream.url.toString()));
       await _player.play();
       if (mounted) setState(() => _loading = false);
     } catch (_) {
@@ -71,14 +83,14 @@ class _TrailerScreenState extends State<TrailerScreen> {
           _error = 'Impossible de charger la bande annonce';
         });
       }
-    } finally {
-      yt.close();
     }
+    // _yt reste ouvert jusqu'au dispose() pour que les URLs restent valides
   }
 
   @override
   void dispose() {
     _hideTimer?.cancel();
+    _yt?.close();
     _player.dispose();
     super.dispose();
   }
