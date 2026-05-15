@@ -13,7 +13,6 @@ import '../../features/detail/widget/detail_screen.dart';
 import '../../features/detail/widget/person_screen.dart';
 import '../../features/player/widget/player_overlay.dart';
 import '../../features/profiles/widget/profile_screen.dart';
-import '../../features/download/downloads_screen.dart';
 import '../network/api_client.dart';
 
 part 'app_router.g.dart';
@@ -30,7 +29,6 @@ class AppRoutes {
   static const String detail = '/detail/:mediaType/:tmdbId';
   static const String person = '/person/:personId';
   static const String player = '/player/:mediaType/:tmdbId';
-  static const String downloads = '/downloads';
 }
 
 @riverpod
@@ -44,9 +42,8 @@ GoRouter appRouter(Ref ref) {
     debugLogDiagnostics: false,
     redirect: (context, state) async {
       final location = state.matchedLocation;
-      final activeProfileId = prefs.getString('active_profile_id');
-      final hasActiveProfile = (activeProfileId ?? '').trim().isNotEmpty &&
-          !isLegacyProfileId(activeProfileId);
+      final hasActiveProfile =
+          (prefs.getString('active_profile_id') ?? '').trim().isNotEmpty;
 
       // Routes publiques (pas besoin d'être connecté)
       final publicRoutes = [AppRoutes.splash, AppRoutes.login];
@@ -95,14 +92,12 @@ GoRouter appRouter(Ref ref) {
           if (location.startsWith('/browse/movie')) selectedIndex = 1;
           if (location.startsWith('/browse/tv')) selectedIndex = 2;
           if (location.startsWith('/search')) selectedIndex = 3;
-          if (location.startsWith('/downloads')) selectedIndex = 4;
-          if (location.startsWith('/profiles')) selectedIndex = 5;
+          if (location.startsWith('/profiles')) selectedIndex = 4;
           // detail et person n'activent aucun onglet
           if (location.startsWith('/detail') ||
               location.startsWith('/person')) {
             selectedIndex = -1;
           }
-
           return MainScaffold(selectedIndex: selectedIndex, child: child);
         },
         routes: [
@@ -112,19 +107,17 @@ GoRouter appRouter(Ref ref) {
           ),
           GoRoute(
             path: AppRoutes.browseMovies,
-            builder: (context, state) => const BrowseScreen(mediaType: 'movie'),
+            builder: (context, state) =>
+                const BrowseScreen(mediaType: 'movie'),
           ),
           GoRoute(
             path: AppRoutes.browseTv,
-            builder: (context, state) => const BrowseScreen(mediaType: 'tv'),
+            builder: (context, state) =>
+                const BrowseScreen(mediaType: 'tv'),
           ),
           GoRoute(
             path: AppRoutes.search,
             builder: (context, state) => const SearchScreen(),
-          ),
-          GoRoute(
-            path: AppRoutes.downloads,
-            builder: (context, state) => const DownloadsScreen(),
           ),
           GoRoute(
             path: AppRoutes.profiles,
@@ -168,39 +161,16 @@ GoRouter appRouter(Ref ref) {
             return null;
           }
 
-          String readProfileId() {
-            final fromQuery = query['profileId'];
-            if (fromQuery != null && fromQuery.isNotEmpty) return fromQuery;
-            final value = extra['profileId'];
-            if (value is String && value.isNotEmpty) return value;
-            return '';
-          }
-
-          String? readString(String key) {
-            final fromQuery = query[key];
-            if (fromQuery != null && fromQuery.isNotEmpty) return fromQuery;
-            final value = extra[key];
-            if (value is String && value.isNotEmpty) return value;
-            return null;
-          }
-
           return PlayerScreen(
             tmdbId: tmdbId,
             mediaType: mediaType,
-            profileId: readProfileId(),
+            profileId: readInt('profileId') ?? 0,
             season: readInt('season'),
             episode: readInt('episode'),
             startPosition: readInt('startPosition') ?? 0,
             title: extra['title'] as String?,
             subtitle: extra['subtitle'] as String?,
             artworkUrl: extra['artworkUrl'] as String?,
-            localVideoPath: extra['localVideoPath'] as String?,
-            initialSourceKey: readString('sourceKey'),
-            localSubtitles: (extra['localSubtitles'] as List?)
-                    ?.whereType<Map>()
-                    .map((item) => Map<String, dynamic>.from(item))
-                    .toList(growable: false) ??
-                const [],
           );
         },
       ),
@@ -217,9 +187,8 @@ class _SplashScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final isAuthenticated = ref.watch(authStateProvider);
     final prefs = ref.watch(sharedPreferencesProvider);
-    final activeProfileId = prefs.getString('active_profile_id');
-    final hasActiveProfile = (activeProfileId ?? '').trim().isNotEmpty &&
-        !isLegacyProfileId(activeProfileId);
+    final hasActiveProfile =
+        (prefs.getString('active_profile_id') ?? '').trim().isNotEmpty;
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (context.mounted) {

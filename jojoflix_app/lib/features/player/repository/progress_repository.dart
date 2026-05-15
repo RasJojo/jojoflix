@@ -16,7 +16,7 @@ class ProgressRepository {
   ProgressRepository({required this.apiClient});
 
   Future<void> syncProgress({
-    required String profileId,
+    required int profileId,
     required String tmdbId,
     required String mediaType,
     int? seasonNum,

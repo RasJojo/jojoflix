@@ -1,39 +1,21 @@
 import type { HttpContext } from '@adonisjs/core/http'
 import SubtitlesService, { type SubtitleEntry } from '#services/subtitles_service'
-import SubdlService from '#services/subdl_service'
-import SubsourceService from '#services/subsource_service'
 import TmdbService from '#services/tmdb_service'
+import MediaMarker from '#models/media_marker'
 import CacheWrapper, { CACHE_TTL } from '#services/cache_wrapper'
-import ConvexRepository from '#services/convex_repository'
-import StreamRegistry from '#services/stream_registry'
-import {
-  extractSubtitleTrackAsVtt,
-  isTextSubtitleCodec,
-  probeMediaInfo,
-  type SubtitleTrackInfoPayload,
-} from '#services/media_probe_service'
-import { auth as betterAuth } from '#services/better_auth'
+import User from '#models/user'
 import got from 'got'
+import { Secret } from '@adonisjs/core/helpers'
 import logger from '@adonisjs/core/services/logger'
-import env from '#start/env'
-import crypto from 'node:crypto'
 
 export default class SubtitlesController {
-  private readonly registry = new StreamRegistry()
-
   /**
    * Liste les sous-titres disponibles — sans téléchargement, sans quota consommé.
    * Appelé à l'ouverture du sélecteur dans le player.
    */
-  async list(ctx: HttpContext) {
-    const { params, request, response } = ctx
-    const userId = await this.resolveUserId(ctx)
-    if (!userId) {
-      return response.unauthorized({
-        error: { code: 'AUTH_INVALID', message: 'Non authentifié', status: 401 },
-      })
-    }
-    const tmdbId = params.tmdb_id as string
+  async list({ auth, params, request, response }: HttpContext) {
+    auth.getUserOrFail()
+    const { tmdb_id } = params
     const season = request.qs().season ? Number(request.qs().season) : undefined
     const episode = request.qs().episode ? Number(request.qs().episode) : undefined
     const tmdb = new TmdbService()
@@ -41,8 +23,8 @@ export default class SubtitlesController {
     // Résoudre le IMDB ID depuis TMDB (movie ou série)
     let imdbId: string | null = null
     try {
-      const mediaType = season !== undefined ? 'tv' : 'movie'
-      imdbId = await tmdb.getImdbId(Number(tmdbId), mediaType)
+      const mediaType = season != null ? 'tv' : 'movie'
+      imdbId = await tmdb.getImdbId(Number(tmdb_id), mediaType)
     } catch {
       return response.ok({ data: [] })
     }
@@ -53,7 +35,7 @@ export default class SubtitlesController {
     try {
       const lookupCandidates = await this.buildSubtitleLookupCandidates(
         tmdb,
-        Number(tmdbId),
+        Number(tmdb_id),
         season,
         episode
       )
@@ -68,10 +50,10 @@ export default class SubtitlesController {
         }
       }
 
-      if (selectedCandidateLabel !== 'requested' && season !== undefined && episode !== undefined) {
+      if (selectedCandidateLabel !== 'requested' && season != null && episode != null) {
         logger.info(
           {
-            tmdbId,
+            tmdbId: tmdb_id,
             imdbId,
             season,
             episode,
@@ -82,92 +64,12 @@ export default class SubtitlesController {
         )
       }
 
-      const hasFrench = () =>
-        entries.some((e) => ['fr', 'french'].includes(e.language.toLowerCase()))
-
-      // ── SubDL fallback — si pas de sous-titre français ────────────────────
-      if (!hasFrench()) {
-        const subdlKey = env.get('SUBDL_API_KEY')
-        if (subdlKey) {
-          try {
-            const subdl = new SubdlService(subdlKey)
-            const subdlEntries = await subdl.listSubtitles(imdbId, season, episode)
-            // When a specific episode is requested, drop entries tagged for a
-            // different episode — SubDL can return adjacent episodes in its response.
-            const relevantSubdl =
-              episode !== undefined
-                ? subdlEntries.filter(
-                    (e) => e.episode === null || e.episode === undefined || e.episode === episode
-                  )
-                : subdlEntries
-            const mapped = relevantSubdl.map((e) => ({
-              file_id: `subdl:${e.file_id}`,
-              language: e.language,
-              release_name: e.release_name,
-              hearing_impaired: false,
-            }))
-            entries = [...entries, ...mapped]
-            if (mapped.length > 0) {
-              logger.info({ tmdbId, count: mapped.length }, 'Subtitles from SubDL')
-            }
-          } catch (err) {
-            logger.warn(
-              { err: err instanceof Error ? err.message : String(err) },
-              'SubDL list failed'
-            )
-          }
-        }
-      }
-
-      // ── SubSource fallback — si toujours pas de sous-titre français ───────
-      if (!hasFrench()) {
-        const flareSolverrUrl = this.resolveFlareSolverrUrl()
-        try {
-          const mediaType = season !== undefined ? 'tv' : 'movie'
-          let title: string | undefined
-          let year: number | undefined
-          if (mediaType === 'movie') {
-            const movie = await tmdb.getMovie(Number(tmdbId))
-            title = movie.title
-            year = movie.release_date ? new Date(movie.release_date).getFullYear() : undefined
-          } else {
-            const show = await tmdb.getTvShow(Number(tmdbId))
-            title = show.name
-            year = show.first_air_date ? new Date(show.first_air_date).getFullYear() : undefined
-          }
-
-          if (title && year) {
-            const subsource = new SubsourceService(
-              env.get('SUBSOURCE_API_KEY') ?? '',
-              flareSolverrUrl
-            )
-            const ssEntries = await subsource.listSubtitles(title, imdbId, season, episode, year)
-            const mapped = ssEntries.map((e) => ({
-              file_id: e.file_id,
-              language: e.language,
-              release_name: e.release_name,
-              hearing_impaired: false,
-            }))
-            entries = [...entries, ...mapped]
-            if (mapped.length > 0) {
-              logger.info({ tmdbId, count: mapped.length }, 'Subtitles from SubSource')
-            }
-          }
-        } catch (err) {
-          logger.warn(
-            { err: err instanceof Error ? err.message : String(err) },
-            'SubSource list failed'
-          )
-        }
-      }
-
-      const embeddedEntries = await this.listEmbeddedSubtitles(ctx)
-      return response.ok({ data: this.mergeSubtitleEntries(embeddedEntries, entries) })
+      return response.ok({ data: entries })
     } catch (error) {
       const upstreamStatus = this.extractUpstreamStatus(error)
       logger.warn(
         {
-          tmdbId,
+          tmdbId: tmdb_id,
           imdbId,
           season,
           episode,
@@ -184,16 +86,9 @@ export default class SubtitlesController {
    * Télécharge un sous-titre spécifique par file_id — consomme 1 quota.
    * Appelé uniquement quand l'utilisateur sélectionne un sous-titre explicitement.
    */
-  async download(ctx: HttpContext) {
-    const { request, response } = ctx
-    const userId = await this.resolveUserId(ctx)
-    if (!userId) {
-      return response.unauthorized({
-        error: { code: 'AUTH_INVALID', message: 'Non authentifié', status: 401 },
-      })
-    }
-
-    const fileId = String(request.input('file_id') ?? '').trim()
+  async download({ auth, request, response }: HttpContext) {
+    auth.getUserOrFail()
+    const fileId = Number(request.input('file_id'))
     const language = request.input('language', 'fr')
 
     if (!fileId) {
@@ -202,107 +97,33 @@ export default class SubtitlesController {
       })
     }
 
+    const service = new SubtitlesService()
     try {
+      const result = await service.downloadSubtitle(fileId, language)
+      const normalizedLang = String(result.language || 'und')
+        .toLowerCase()
+        .replace(/[^a-z0-9-]/g, '')
+      const proxyId = `${fileId}_${normalizedLang || 'und'}`
+
+      // Stocker l'URL réelle en cache (jamais exposée au client Flutter)
       const cache = new CacheWrapper()
-      const normalizedLang =
-        String(language || 'und')
-          .toLowerCase()
-          .replace(/[^a-z0-9-]/g, '') || 'und'
-      // Include userId so two different users requesting the same subtitle get
-      // separate proxyIds — without this, user B's download() call overwrites
-      // vtt:owner for user A's proxyId and user A gets 403 on serveVtt().
-      const proxyId = crypto
-        .createHash('md5')
-        .update(`${userId}:${fileId}:${normalizedLang}`)
-        .digest('hex')
-      // Bind this proxyId to the requesting user so serveVtt() can enforce ownership.
-      await cache.set(`vtt:owner:${proxyId}`, userId, CACHE_TTL.SUBTITLES)
-
-      let vttContent: string
-
-      if (fileId.startsWith('embedded:')) {
-        // Check cache first — extraction from a remote 4K file takes ~60s, avoid re-extracting
-        const cachedVtt = await cache.get<string>(`vtt:raw:${proxyId}`)
-        if (cachedVtt) {
-          const token = this.extractAccessTokenFromRequest(request)
-          const proxyUrl = token
-            ? `/api/subtitles/vtt/${proxyId}?token=${encodeURIComponent(token)}`
-            : `/api/subtitles/vtt/${proxyId}`
-          return response.ok({ data: { proxy_url: proxyUrl, language } })
-        }
-        const embeddedVtt = await this.downloadEmbeddedSubtitle(ctx, fileId)
-        if (!embeddedVtt) throw new Error('Embedded subtitle unavailable')
-        vttContent = embeddedVtt
-      } else if (fileId.startsWith('subsource:html:')) {
-        // ── SubSource download ──────────────────────────────────────────────
-        const detailPath = fileId.slice('subsource:html:'.length)
-        if (!/^[a-zA-Z0-9/_-]+$/.test(detailPath)) {
-          return response.badRequest({
-            error: {
-              code: 'INVALID_SUBTITLE_PATH',
-              message: 'Chemin de sous-titre invalide',
-              status: 400,
-            },
-          })
-        }
-        const flareSolverrUrl = this.resolveFlareSolverrUrl()
-        const subsource = new SubsourceService(env.get('SUBSOURCE_API_KEY') ?? '', flareSolverrUrl)
-        const downloadUrl = await subsource.getDownloadUrl(detailPath)
-        const srtContent = await subsource.downloadFile(downloadUrl, detailPath)
-        vttContent = this.srtToVtt(srtContent.replace(/^\uFEFF/, ''))
-      } else if (fileId.startsWith('subdl:')) {
-        // ── SubDL download ──────────────────────────────────────────────────
-        const subdlPath = fileId.slice('subdl:'.length)
-        const subdlKey = env.get('SUBDL_API_KEY') ?? ''
-        const subdl = new SubdlService(subdlKey)
-        const zipUrl = await subdl.getDownloadUrl(subdlPath)
-        const MAX_ZIP_BYTES = 5_000_000
-        const zipBuffer = await got
-          .get(zipUrl, { timeout: { request: 30_000 }, retry: { limit: 0 } })
-          .buffer()
-        if (zipBuffer.length > MAX_ZIP_BYTES) {
-          throw new Error(`SubDL zip too large: ${zipBuffer.length} bytes`)
-        }
-        const { inflateRawSync } = await import('node:zlib')
-        // basic zip extraction — find first .srt
-        const srtContent = this.extractFromZipBuffer(zipBuffer, inflateRawSync)
-        vttContent = this.srtToVtt(srtContent.replace(/^\uFEFF/, ''))
-      } else {
-        // ── OpenSubtitles download ──────────────────────────────────────────
-        const service = new SubtitlesService()
-        const result = await service.downloadSubtitle(fileId, language)
-        await cache.set(`vtt:url:${proxyId}`, result.url, CACHE_TTL.SUBTITLES)
-        vttContent = await this.fetchNormalizedVtt(result.url)
-      }
-
-      // Valider le contenu VTT avant de mettre en cache pour éviter de cacher un VTT vide/corrompu
-      if (!vttContent || !vttContent.trimStart().startsWith('WEBVTT')) {
-        throw new Error('Invalid or empty VTT content')
-      }
-      await cache.set(`vtt:raw:${proxyId}`, vttContent, CACHE_TTL.SUBTITLES)
+      await cache.set(`vtt:url:${proxyId}`, result.url, CACHE_TTL.SUBTITLES)
+      const normalizedVtt = await this.fetchNormalizedVtt(result.url)
+      await cache.set(`vtt:raw:${proxyId}`, normalizedVtt, CACHE_TTL.SUBTITLES)
       const token = this.extractAccessTokenFromRequest(request)
       const proxyUrl = token
         ? `/api/subtitles/vtt/${proxyId}?token=${encodeURIComponent(token)}`
         : `/api/subtitles/vtt/${proxyId}`
 
-      return response.ok({ data: { proxy_url: proxyUrl, language } })
+      return response.ok({
+        data: {
+          proxy_url: proxyUrl,
+          language: result.language,
+        },
+      })
     } catch (error) {
       const upstreamStatus = this.extractUpstreamStatus(error)
       const isRateLimit = upstreamStatus === 429
-      // Purger le cache en cas d'échec pour éviter de conserver un VTT vide ou corrompu.
-      // BUG #3 fix: also purge vtt:owner so the user can retry instead of being stuck
-      // with a 403/404 for the full TTL duration.
-      const failedNormalizedLang =
-        String(language || 'und')
-          .toLowerCase()
-          .replace(/[^a-z0-9-]/g, '') || 'und'
-      const failedProxyId = crypto
-        .createHash('md5')
-        .update(`${userId}:${fileId}:${failedNormalizedLang}`)
-        .digest('hex')
-      await new CacheWrapper().forget(`vtt:raw:${failedProxyId}`).catch(() => {})
-      await new CacheWrapper().forget(`vtt:owner:${failedProxyId}`).catch(() => {})
-      await new CacheWrapper().forget(`vtt:url:${failedProxyId}`).catch(() => {})
       logger.warn(
         {
           fileId,
@@ -324,218 +145,19 @@ export default class SubtitlesController {
     }
   }
 
-  private async listEmbeddedSubtitles(ctx: HttpContext): Promise<SubtitleEntry[]> {
-    const directUrl = await this.resolveActiveDirectUrl(ctx)
-    if (!directUrl) return []
-
-    try {
-      const fingerprint = this.streamFingerprint(directUrl)
-      const cache = new CacheWrapper()
-      const probeCacheKey = `probe:tracks:${fingerprint}`
-
-      let subtitleTracks: SubtitleTrackInfoPayload[] | null =
-        await cache.get<SubtitleTrackInfoPayload[]>(probeCacheKey)
-      if (!subtitleTracks) {
-        const info = await probeMediaInfo(directUrl)
-        subtitleTracks = info.subtitle_tracks
-        await cache.set(probeCacheKey, subtitleTracks, CACHE_TTL.SUBTITLES)
-      }
-
-      const embedded = subtitleTracks
-        .filter((track) => isTextSubtitleCodec(track.codec))
-        .map((track) => ({
-          file_id: `embedded:${fingerprint}:${track.index}`,
-          language: this.normalizeEmbeddedLanguage(track),
-          release_name: this.embeddedSubtitleReleaseName(track),
-          hearing_impaired: this.isHearingImpairedTrack(track),
-        }))
-
-      if (embedded.length > 0) {
-        logger.info(
-          { count: embedded.length, totalTracks: subtitleTracks.length },
-          'Subtitles from embedded active stream'
-        )
-      } else if (subtitleTracks.length > 0) {
-        logger.warn(
-          {
-            totalTracks: subtitleTracks.length,
-            codecs: subtitleTracks.map((track) => track.codec),
-          },
-          'Embedded subtitle tracks are not text-extractable'
-        )
-      }
-
-      return embedded
-    } catch (err) {
-      logger.warn(
-        { err: err instanceof Error ? err.message : String(err) },
-        'Embedded subtitle probe failed'
-      )
-      return []
-    }
-  }
-
-  private async downloadEmbeddedSubtitle(ctx: HttpContext, fileId: string): Promise<string | null> {
-    const parsed = this.parseEmbeddedSubtitleFileId(fileId)
-    if (!parsed) return null
-
-    const directUrl = await this.resolveActiveDirectUrl(ctx)
-    if (!directUrl || this.streamFingerprint(directUrl) !== parsed.fingerprint) {
-      throw new Error('Embedded subtitle stream changed')
-    }
-
-    return extractSubtitleTrackAsVtt(directUrl, parsed.trackIndex)
-  }
-
-  private parseEmbeddedSubtitleFileId(
-    fileId: string
-  ): { fingerprint: string; trackIndex: number } | null {
-    // BUG #4 fix: fingerprint is always lowercase hex — drop the i flag to avoid widening attack surface.
-    const match = fileId.match(/^embedded:([a-f0-9]{16}):(\d+)$/)
-    if (!match) return null
-
-    const MAX_EMBEDDED_TRACK_INDEX = 100
-    const trackIndex = Number(match[2])
-    if (!Number.isInteger(trackIndex) || trackIndex < 0) return null
-    if (trackIndex > MAX_EMBEDDED_TRACK_INDEX) return null
-    return { fingerprint: match[1].toLowerCase(), trackIndex }
-  }
-
-  private async resolveActiveDirectUrl(ctx: HttpContext): Promise<string | null> {
-    const userId = await this.resolveUserId(ctx)
-    if (!userId) return null
-    const requestedStreamId = this.normalizeStreamId(ctx.request.input('stream_id'))
-    if (requestedStreamId) {
-      const directUrl = await this.registry.getUrlByStream(userId, requestedStreamId)
-      if (directUrl) return directUrl
-    }
-    return this.registry.getActiveUrl(userId)
-  }
-
-  private normalizeStreamId(value: unknown): string | null {
-    const streamId = String(value ?? '').trim()
-    if (!streamId) return null
-    if (!/^[a-zA-Z0-9._:-]{1,120}$/.test(streamId)) return null
-    return streamId
-  }
-
-  private streamFingerprint(url: string): string {
-    return crypto.createHash('sha256').update(url).digest('hex').slice(0, 16)
-  }
-
-  private mergeSubtitleEntries(
-    embeddedEntries: SubtitleEntry[],
-    externalEntries: SubtitleEntry[]
-  ): SubtitleEntry[] {
-    const merged: SubtitleEntry[] = []
-    const seen = new Set<string>()
-
-    for (const entry of [...embeddedEntries, ...externalEntries]) {
-      if (seen.has(entry.file_id)) continue
-      seen.add(entry.file_id)
-      merged.push(entry)
-    }
-
-    return merged
-  }
-
-  private normalizeEmbeddedLanguage(track: SubtitleTrackInfoPayload): string {
-    const raw = `${track.language ?? ''} ${track.title ?? ''}`.trim().toLowerCase()
-    if (
-      /\b(fr|fra|fre|french|français|francais|vostfr|truefrench|vff|vfq|vfi|vfb|vfs)\b/.test(raw) ||
-      /\bvo[-_]?fr\b/.test(raw) ||
-      /\bfr[-_]fr\b/.test(raw)
-    ) {
-      return 'fr'
-    }
-    if (/\b(en|eng|english|anglais)\b/.test(raw)) return 'en'
-    if (/\b(es|spa|spanish|espagnol)\b/.test(raw)) return 'es'
-    if (/\b(de|deu|ger|german|allemand)\b/.test(raw)) return 'de'
-    if (/\b(it|ita|italian|italien)\b/.test(raw)) return 'it'
-    if (/\b(pt|por|portuguese|portugais)\b/.test(raw)) return 'pt'
-    if (/\b(ja|jpn|japanese|japonais)\b/.test(raw)) return 'ja'
-    if (/\b(ko|kor|korean|coréen|coreen)\b/.test(raw)) return 'ko'
-    if (/\b(zh|zho|chi|chinese|chinois)\b/.test(raw)) return 'zh'
-
-    const normalized = String(track.language ?? '')
-      .trim()
-      .toLowerCase()
-    return normalized || 'und'
-  }
-
-  private embeddedSubtitleReleaseName(track: SubtitleTrackInfoPayload): string {
-    const parts = [
-      'Piste intégrée',
-      track.title?.trim(),
-      track.codec.trim().toUpperCase(),
-      track.default ? 'Défaut' : null,
-      track.forced ? 'Forcé' : null,
-    ].filter((value): value is string => Boolean(value && value.trim()))
-
-    return parts.join(' • ')
-  }
-
-  private isHearingImpairedTrack(track: SubtitleTrackInfoPayload): boolean {
-    const text = `${track.title ?? ''} ${track.language ?? ''}`.toLowerCase()
-    return /\b(sdh|cc|hi|hearing|malentendant|sme)\b/.test(text)
-  }
-
-  private extractFromZipBuffer(buf: Buffer, inflateRawSync: (b: Buffer) => Buffer): string {
-    let offset = 0
-    while (offset < buf.length - 30) {
-      if (buf.readUInt32LE(offset) !== 0x04034b50) {
-        offset++
-        continue
-      }
-      const compression = buf.readUInt16LE(offset + 8)
-      const compressedSize = buf.readUInt32LE(offset + 18)
-      const fnLen = buf.readUInt16LE(offset + 26)
-      const extraLen = buf.readUInt16LE(offset + 28)
-      const fileName = buf
-        .slice(offset + 30, offset + 30 + fnLen)
-        .toString('utf-8')
-        .toLowerCase()
-      const dataOffset = offset + 30 + fnLen + extraLen
-      if (fileName.endsWith('.srt') || fileName.endsWith('.vtt')) {
-        if (dataOffset + compressedSize > buf.length) {
-          throw new Error('ZIP entry out of bounds — buffer truncated or corrupt')
-        }
-        const slice = buf.slice(dataOffset, dataOffset + compressedSize)
-        return compression === 8 ? inflateRawSync(slice).toString('utf-8') : slice.toString('utf-8')
-      }
-      if (dataOffset + compressedSize > buf.length) {
-        offset++ // skip corrupt entry gracefully
-        continue
-      }
-      offset = dataOffset + compressedSize
-    }
-    throw new Error('No SRT/VTT file found in zip')
-  }
-
   /**
    * Proxy VTT — sert le fichier directement au player.
    * L'URL réelle Subtitles n'est jamais retournée au client.
    */
-  async serveVtt(ctx: HttpContext) {
-    const { params, response } = ctx
+  async serveVtt({ auth, request, params, response }: HttpContext) {
     // Supporte Bearer ou ?token= pour le fetch direct du player (media_kit).
-    const userId = await this.resolveUserId(ctx)
-    if (!userId) {
+    if (!(await this.resolveUserId(auth, request))) {
       return response.unauthorized({
         error: { code: 'AUTH_INVALID', message: 'Non authentifié', status: 401 },
       })
     }
 
     const cache = new CacheWrapper()
-
-    // Enforce ownership: the proxyId must have been created by this user.
-    const ownerId = await cache.get<string>(`vtt:owner:${params.id}`)
-    if (!ownerId || ownerId !== userId) {
-      return response.forbidden({
-        error: { code: 'FORBIDDEN', message: 'Accès refusé', status: 403 },
-      })
-    }
-
     const cacheKey = `vtt:raw:${params.id}`
 
     const cached = await cache.get<string>(cacheKey)
@@ -583,22 +205,15 @@ export default class SubtitlesController {
     return response.ok(vttContent)
   }
 
-  async markers(ctx: HttpContext) {
-    const { params, response } = ctx
-    const userId = await this.resolveUserId(ctx)
-    if (!userId) {
-      return response.unauthorized({
-        error: { code: 'AUTH_INVALID', message: 'Non authentifié', status: 401 },
-      })
-    }
-    const tmdbId = params.tmdb_id as string
+  async markers({ auth, params, response }: HttpContext) {
+    auth.getUserOrFail()
+    const { tmdb_id } = params
 
     const cache = new CacheWrapper()
-    const cacheKey = `markers:${tmdbId}`
+    const cacheKey = `markers:${tmdb_id}`
 
     const markers = await cache.remember(cacheKey, CACHE_TTL.MARKERS, async () => {
-      const repo = new ConvexRepository()
-      const dbMarkers = await repo.getMarkersByTmdb(tmdbId)
+      const dbMarkers = await MediaMarker.query().where('tmdb_id', tmdb_id)
       return dbMarkers.map((m) => ({
         type: m.markerType,
         start_time: m.startTime,
@@ -609,78 +224,18 @@ export default class SubtitlesController {
     return response.ok({ data: markers })
   }
 
-  async storeMarker(ctx: HttpContext) {
-    const { request, response } = ctx
-
-    // BUG #10 fix: storeMarker was completely unauthenticated — add the same auth check
-    // used by all other methods in this controller.
-    const userId = await this.resolveUserId(ctx)
-    if (!userId) {
-      return response.unauthorized({
-        error: { code: 'AUTH_INVALID', message: 'Non authentifié', status: 401 },
-      })
-    }
-
-    const body = request.body()
-
-    // BUG #11 fix: validate the incoming body before trusting it.
-    const tmdbId = body.tmdb_id
-    const markerType = body.marker_type
-    const startTime = body.start_time
-    const endTime = body.end_time
-
-    if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
-      return response.badRequest({
-        error: {
-          code: 'INVALID_TMDB_ID',
-          message: 'tmdb_id doit être un entier positif',
-          status: 400,
-        },
-      })
-    }
-    if (markerType !== 'intro' && markerType !== 'outro') {
-      return response.badRequest({
-        error: {
-          code: 'INVALID_MARKER_TYPE',
-          message: "marker_type doit être 'intro' ou 'outro'",
-          status: 400,
-        },
-      })
-    }
-    if (typeof startTime !== 'number' || !Number.isFinite(startTime) || startTime < 0) {
-      return response.badRequest({
-        error: {
-          code: 'INVALID_START_TIME',
-          message: 'start_time doit être un nombre >= 0',
-          status: 400,
-        },
-      })
-    }
-    if (
-      typeof endTime !== 'number' ||
-      !Number.isFinite(endTime) ||
-      endTime <= 0 ||
-      endTime <= startTime
-    ) {
-      return response.badRequest({
-        error: {
-          code: 'INVALID_END_TIME',
-          message: 'end_time doit être un nombre positif supérieur à start_time',
-          status: 400,
-        },
-      })
-    }
-
-    const repo = new ConvexRepository()
-    const marker = await repo.createMediaMarker({
-      tmdbId: String(tmdbId),
-      markerType,
-      startTime,
-      endTime,
+  async storeMarker({ auth, request, response }: HttpContext) {
+    auth.getUserOrFail()
+    const { tmdb_id, marker_type, start_time, end_time } = request.body()
+    const marker = await MediaMarker.create({
+      tmdbId: tmdb_id,
+      markerType: marker_type,
+      startTime: start_time,
+      endTime: end_time,
     })
 
     const cache = new CacheWrapper()
-    await cache.forget(`markers:${tmdbId}`)
+    await cache.forget(`markers:${tmdb_id}`)
 
     return response.created({ data: marker })
   }
@@ -696,25 +251,23 @@ export default class SubtitlesController {
     return queryToken && queryToken.trim().length > 0 ? queryToken.trim() : null
   }
 
-  private async resolveUserId(ctx: HttpContext): Promise<string | null> {
-    if (ctx.betterAuthUser) return ctx.betterAuthUser.id
+  private async resolveUserId(
+    auth: HttpContext['auth'],
+    request: HttpContext['request']
+  ): Promise<number | null> {
+    try {
+      const user = auth.getUserOrFail()
+      return user.id
+    } catch {
+      // fallback token query/bearer
+    }
 
-    const token = this.extractAccessTokenFromRequest(ctx.request)
+    const token = this.extractAccessTokenFromRequest(request)
     if (!token) return null
 
-    const session = await betterAuth.api
-      .getSession({ headers: new Headers({ authorization: `Bearer ${token}` }) })
-      .catch(() => null)
-    return session?.user.id ?? null
-  }
-
-  private resolveFlareSolverrUrl(): string {
-    const configured = env.get('FLARESOLVERR_URL')?.trim()
-    if (configured) return configured
-
-    return env.get('NODE_ENV') === 'production'
-      ? 'http://jojoflix-flaresolverr:8191'
-      : 'http://127.0.0.1:8191'
+    const accessToken = await User.accessTokens.verify(new Secret(token))
+    if (!accessToken || accessToken.isExpired()) return null
+    return Number(accessToken.tokenableId)
   }
 
   private async buildSubtitleLookupCandidates(
@@ -726,23 +279,15 @@ export default class SubtitlesController {
     const candidates: Array<{ season?: number; episode?: number; label: string }> = []
     const seen = new Set<string>()
 
-    const push = (
-      candidateSeason: number | undefined,
-      candidateEpisode: number | undefined,
-      label: string
-    ) => {
+    const push = (candidateSeason: number | undefined, candidateEpisode: number | undefined, label: string) => {
       const normalizedSeason =
-        candidateSeason !== undefined && Number.isFinite(candidateSeason)
-          ? Math.floor(candidateSeason)
-          : undefined
+        candidateSeason != null && Number.isFinite(candidateSeason) ? Math.floor(candidateSeason) : undefined
       const normalizedEpisode =
-        candidateEpisode !== undefined && Number.isFinite(candidateEpisode)
-          ? Math.floor(candidateEpisode)
-          : undefined
+        candidateEpisode != null && Number.isFinite(candidateEpisode) ? Math.floor(candidateEpisode) : undefined
 
       if (
-        normalizedSeason !== undefined &&
-        normalizedEpisode !== undefined &&
+        normalizedSeason != null &&
+        normalizedEpisode != null &&
         (normalizedSeason <= 0 || normalizedEpisode <= 0)
       ) {
         return
@@ -756,7 +301,7 @@ export default class SubtitlesController {
 
     push(season, episode, 'requested')
 
-    if (season === undefined || episode === undefined) {
+    if (season == null || episode == null) {
       return candidates
     }
 
@@ -782,28 +327,12 @@ export default class SubtitlesController {
   }
 
   private async fetchNormalizedVtt(subtitleUrl: string): Promise<string> {
-    const MAX_SUBTITLE_BYTES = 5_000_000 // 5 MB — largement suffisant pour un VTT, protège contre les OOM
-    const chunks: Buffer[] = []
-    let totalBytes = 0
-
-    await new Promise<void>((resolve, reject) => {
-      const stream = got.stream(subtitleUrl, {
+    const rawBuffer = await got
+      .get(subtitleUrl, {
         timeout: { request: 12000 },
         retry: { limit: 0 },
       })
-      stream.on('data', (chunk: Buffer) => {
-        totalBytes += chunk.length
-        if (totalBytes > MAX_SUBTITLE_BYTES) {
-          stream.destroy(new Error(`Subtitle response exceeds ${MAX_SUBTITLE_BYTES} bytes`))
-          return
-        }
-        chunks.push(chunk) // Only push if within limits
-      })
-      stream.on('end', resolve)
-      stream.on('error', reject)
-    })
-
-    const rawBuffer = Buffer.concat(chunks)
+      .buffer()
 
     let text: string
     try {
@@ -812,10 +341,7 @@ export default class SubtitlesController {
       text = new TextDecoder('latin1').decode(rawBuffer)
     }
 
-    text = text
-      .replace(/^\uFEFF/, '')
-      .replace(/\r\n/g, '\n')
-      .replace(/\r/g, '\n')
+    text = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
 
     const trimmed = text.trimStart()
     if (!trimmed.startsWith('WEBVTT')) {

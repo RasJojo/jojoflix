@@ -1,237 +1,463 @@
-# JojoFlix
+# 🎬 JojoFlix
 
-JojoFlix est une plateforme de streaming self-hosted avec une API AdonisJS, une
-application Flutter multiplateforme, un monitor web leger et une couche de
-donnees applicatives Convex.
+Plateforme de streaming self-hosted multiplateforme avec support complet des sous-titres, profils utilisateur, et sources torrent smart-ranked.
 
-Le depot est un monorepo:
+## 🎯 Vue d'ensemble
 
-| Chemin | Role |
-| --- | --- |
-| `jojoflix-api/` | API AdonisJS v6, streaming, sources, sous-titres, auth, Convex |
-| `jojoflix_app/` | App Flutter Android, iOS, macOS, Web et desktop |
-| `jojoflix_monitor/` | Dashboard Vite/React pour observer les sessions actives |
-| `docker-compose.yml` | Stack locale/prod simple: API + Nginx web |
-| `caddy/`, `nginx/` | Reverse proxy et serving web |
+JojoFlix est une suite complète pour découvrir et regarder du contenu multimédia (films, séries, documentaires) en streaming, avec:
 
-## Architecture
+- **Backend puissant**: API AdonisJS v6 (ESM strict), PostgreSQL, Redis cache
+- **App multiplateforme**: Flutter (Android, iOS, macOS, Web)
+- **Sources intelligentes**: Real-Debrid + Torrentio/MediaFusion avec ranking smart
+- **Sous-titres**: Intégration SubSense pour 30+ langues
+- **Profiles multiples**: Gestion multi-user comme Netflix
+- **Contenu français**: Boost VOSTFR, DramaYo, support complet français
+
+---
+
+## 🏗️ Architecture Système
 
 ```mermaid
 graph TB
-    app["Flutter app<br/>mobile, desktop, web"]
-    web["Nginx web"]
-    api["AdonisJS API<br/>Node 24, ESM"]
-    sqlite["SQLite<br/>Better Auth / auth locale"]
-    convex["Convex<br/>profils, historique, watchlist, cache"]
-    tmdb["TMDB"]
-    rd["Real-Debrid"]
-    providers["Torrentio / MediaFusion / DramaYo"]
-    subtitles["OpenSubtitles / SubDL / SubSource"]
-    fs["Filesystem<br/>VTT, fichiers temporaires"]
-
-    app --> api
-    web --> app
-    api --> sqlite
-    api --> convex
+    subgraph clients["📱 Client Applications"]
+        android["Android<br/>(Mobile)"]
+        ios["iOS<br/>(Mobile)"]
+        macos["macOS<br/>(Desktop)"]
+        web["Web<br/>(Nginx)"]
+        windows["Windows<br/>(Minimal)"]
+    end
+    
+    clients -->|"HTTPS<br/>Bearer Token"| nginx["🔀 NGINX Reverse Proxy<br/>Port 80/443"]
+    
+    subgraph backend["⚙️ Backend Services"]
+        api["API AdonisJS v6<br/>Port 3333<br/><br/>Controllers:<br/>• /auth<br/>• /media<br/>• /progress<br/>• /streaming<br/>• /subtitles"]
+    end
+    
+    subgraph external["🌐 External Services"]
+        tmdb["TMDB API<br/>Metadata"]
+        rd["Real-Debrid<br/>Streaming Proxy"]
+        subsense["SubSense<br/>Subtitles"]
+        mediafusion["MediaFusion<br/>Torrent Sources"]
+    end
+    
+    nginx --> api
     api --> tmdb
     api --> rd
-    api --> providers
-    api --> subtitles
-    api --> fs
+    api --> subsense
+    api --> mediafusion
+    
+    subgraph storage["💾 Data Layer"]
+        postgres["PostgreSQL<br/>Database<br/><br/>• Users<br/>• Profiles<br/>• Watch History<br/>• Markers"]
+        redis["Redis Cache<br/><br/>• Sessions<br/>• Streams<br/>• Cached Data"]
+        filesystem["File System<br/><br/>• Subtitles .vtt<br/>• Metadata"]
+    end
+    
+    api --> postgres
+    api --> redis
+    api --> filesystem
+    
+    style clients fill:#e1f5ff
+    style backend fill:#f3e5f5
+    style external fill:#e8f5e9
+    style storage fill:#fff3e0
 ```
 
-Le contrat principal reste REST cote app. Convex est appele par l'API via
-`jojoflix-api/app/services/convex_repository.ts`, ce qui permet d'ameliorer la
-donnee backend sans imposer un rebuild Flutter pour chaque optimisation.
+---
 
-## Donnees Convex
+## 📊 Flux de Données
 
-Convex porte les donnees produit qui changent souvent:
+### 1️⃣ Authentication Flow
 
-| Domaine | Details |
-| --- | --- |
-| Profils | `getProfilesByUser`, `getProfileOfUser`, creation, update, suppression |
-| Watch history | Progression par profil, film ou episode TV, reprise continue |
-| Watchlist | Stockee dans `profile.preferences.watchlist` et exposee par l'API |
-| Interets | Scores par genre pour alimenter les recommandations |
-| Markers media | Intro/outro par `tmdbId` |
-| Cache API | Entrees TTL via `CacheWrapper` et fonctions `jojoflix:*` |
+```mermaid
+sequenceDiagram
+    participant User as User (App)
+    participant API as API Backend
+    participant DB as PostgreSQL
+    participant Redis as Redis
+    
+    User->>API: POST /auth/login<br/>{email, password}
+    API->>DB: Query user by email
+    DB-->>API: User record
+    API->>API: Verify password (bcrypt)
+    API->>DB: Create AccessToken
+    DB-->>API: Token stored
+    API->>Redis: Store session<br/>TTL: 7 days
+    Redis-->>API: ✅ Cached
+    API-->>User: Bearer Token<br/>+ User Data
+    Note over User: Store in secure storage<br/>Include in all requests
+```
 
-Points importants des dernieres evolutions:
+### 2️⃣ Media Discovery Flow
 
-- `/api/home/:profile_id` assemble les lignes accueil depuis Convex, TMDB et la
-  watchlist, puis met le resultat en cache court.
-- Le cache accueil utilise la cle `home:rows:v2:${profileId}` avec environ 20
-  secondes de TTL.
-- `ProgressController` invalide le cache accueil apres `progress/sync`.
-- `WatchlistController` invalide le cache accueil apres ajout ou retrait.
-- La reprise TV cherche le dernier episode actif d'une serie via
-  `getWatchHistoriesByTmdb`, pas seulement une entree `(tmdbId, mediaType)`.
-- Les formes de reponse REST existantes doivent rester stables pour l'app.
+```mermaid
+sequenceDiagram
+    participant User as User (App)
+    participant API as API Backend
+    participant Redis as Redis Cache
+    participant DB as PostgreSQL
+    participant TMDB as TMDB API
+    
+    User->>API: GET /api/home<br/>+ Bearer Token
+    API->>Redis: Check cache
+    alt Cached (TTL valid)
+        Redis-->>API: Return cached data
+        API-->>User: ✅ Fast response
+    else Cache miss
+        API->>DB: Query watch_history<br/>for active profile
+        DB-->>API: Raw records
+        API->>TMDB: Enrich with metadata<br/>(poster, backdrop, rating)
+        TMDB-->>API: Enhanced data
+        API->>Redis: Cache 5 minutes TTL
+        API-->>User: {continueWatching, trending}
+    end
+```
 
-## API
+### 3️⃣ Streaming & Source Selection Flow
 
-Routes principales:
+```mermaid
+graph LR
+    A["🎬 User Clicks Play"] -->|GET /streaming/sources| B["API Backend"]
+    
+    B --> C{Redis Cache?}
+    C -->|Hit| D["Return cached<br/>sources"]
+    C -->|Miss| E["Fetch Torrents<br/>MediaFusion/Torrentio"]
+    
+    E --> F["📊 Score & Rank<br/>Algorithm"]
+    F --> F1["Quality Boost<br/>1080p: +25%"]
+    F --> F2["Language Boost<br/>VOSTFR: +35%"]
+    F --> F3["Seeders Score<br/>+25%"]
+    F --> F4["Reputation<br/>+15%"]
+    
+    F1 & F2 & F3 & F4 --> G["🎯 Ranked Sources"]
+    
+    G --> H["Real-Debrid<br/>Stream Proxy"]
+    H --> I["Get Direct URL<br/>+ Duration"]
+    
+    I --> J["SubSense<br/>Subtitles"]
+    J --> K["Cache All<br/>1 hour TTL"]
+    
+    K --> L["Return to App<br/>Best source selected"]
+    D --> L
+    
+    L --> M["📱 App<br/>Initializes Player"]
+    
+    style A fill:#e1f5ff
+    style G fill:#f3e5f5
+    style H fill:#fff3e0
+    style M fill:#e8f5e9
+```
 
-| Route | Role |
-| --- | --- |
-| `GET /health` | Healthcheck API |
-| `POST /api/auth/register`, `POST /api/auth/login` | Creation compte et login |
-| `GET/POST/PUT/DELETE /api/profiles` | Profils Convex |
-| `GET /api/home/:profile_id` | Accueil personnalise |
-| `GET /api/browse/:mediaType` | Lignes browse films/series |
-| `GET /api/media/:mediaType/:tmdbId` | Detail film/serie |
-| `GET /api/search` | Recherche TMDB |
-| `GET /api/sources/...` | Selection manuelle des sources |
-| `GET /api/stream/...` | Streaming direct ou proxy |
-| `GET/POST /api/subtitles/...` | Liste, download, VTT, markers |
-| `GET /api/progress/:mediaType/:tmdbId` | Reprise de lecture |
-| `POST /api/progress/sync` | Synchronisation progression |
-| `GET/POST/DELETE /api/profiles/:id/watchlist` | Watchlist |
-| `GET /api/download/...` | Liens de telechargement |
+### 4️⃣ Intelligent Ranking Algorithm
 
-## Prerequis
+```mermaid
+graph TD
+    A["Torrent Source"] --> B["Extract Metadata"]
+    B --> B1["Resolution<br/>1080p, 720p, etc"]
+    B --> B2["Language<br/>FR, ENG, etc"]
+    B --> B3["Seeders<br/>Count"]
+    B --> B4["Explicit Labels<br/>Detect"]
+    
+    B1 --> C["🧮 Calculate Score"]
+    B2 --> C
+    B3 --> C
+    B4 --> C
+    
+    C --> D["Score = <br/>quality×0.25 +<br/>language×0.35 +<br/>seeders×0.25 +<br/>reputation×0.15"]
+    
+    D --> E{Score > 7?}
+    E -->|YES| F["✅ Recommended<br/>Show to user"]
+    E -->|NO| G["❌ Hidden<br/>Fallback option"]
+    
+    F --> H["[1080p VOSTFR]<br/>Score: 8.5"]
+    G --> I["[720p ENG]<br/>Score: 7.2"]
+    
+    style C fill:#f3e5f5
+    style H fill:#c8e6c9
+    style I fill:#ffccbc
+```
 
-- Node.js 24+
-- npm
-- Flutter 3.22+ recommande
-- Docker et Docker Compose pour la stack containerisee
-- Un deploiement Convex avec les fonctions `jojoflix:*`
-- Cles TMDB, Real-Debrid et fournisseurs de sous-titres selon les features testees
+---
 
-## Configuration
+## 🛠️ Composants clés
 
-Deux exemples existent:
+### Backend Services
 
-- `.env.example` pour la stack Docker racine.
-- `jojoflix-api/.env.example` pour lancer l'API seule en local.
+| Service | Rôle |
+|---------|------|
+| `TmdbService` | Récupère metadata films/séries (couvertures, castings, etc) |
+| `RealDebridService` | Proxy vers Real-Debrid, extraction URLs directes |
+| `SubtitleService` | Gestion SubSense, conversion VTT, multi-langue |
+| `TorrentScoringService` | Ranking intelligent des sources torrents |
+| `CacheWrapper` | Redis wrapper pour TTL auto et invalidation |
+| `StreamRegistry` | Prévient lectures concurrentes, gère sessions |
+| `RecommendationService` | Suggestions basées watch_history + likes |
 
-Variables importantes:
+### App Components
 
-| Variable | Role |
-| --- | --- |
-| `APP_KEY` | Cle Adonis, a generer avec `node ace generate:key` |
-| `APP_URL` | URL publique de l'API |
-| `DB_PATH` | Chemin SQLite pour les tables d'auth locale |
-| `CONVEX_URL` | URL HTTP du deploiement Convex |
-| `CONVEX_ADMIN_KEY` | Cle serveur Convex, jamais cote client |
-| `RD_API_KEY` | Real-Debrid |
-| `TMDB_API_KEY` | TMDB |
-| `OPENSUBS_API_KEY`, `SUBDL_API_KEY`, `SUBSOURCE_API_KEY` | Sous-titres |
-| `TORRENTIO_URL`, `MEDIAFUSION_URL`, `DRAMAYO_URL` | Providers de sources |
-| `TORRENTIO_PROXY` | Proxy optionnel, par exemple Tor en prod |
+```mermaid
+graph TD
+    subgraph screens["📱 Screens"]
+        login["LoginScreen<br/>Email/Password<br/>+ Toggle Register"]
+        profiles["ProfilesScreen<br/>Select/Create<br/>Profile"]
+        home["HomeScreen<br/>Hero Banner<br/>Continue Watching<br/>Trending"]
+        detail["DetailScreen<br/>Backdrop<br/>Cast<br/>Seasons/Episodes"]
+        player["PlayerScreen<br/>media_kit player<br/>Gesture controls<br/>PiP mode"]
+        search["SearchScreen<br/>TMDB Search<br/>Multi-type"]
+    end
+    
+    subgraph providers["🔄 State Providers"]
+        auth["authStateProvider<br/>Token + User"]
+        profile["profileProvider<br/>Active Profile"]
+        player_state["videoPlayerProvider<br/>Playback State"]
+    end
+    
+    subgraph repos["💾 Repositories"]
+        auth_repo["authRepository"]
+        detail_repo["detailRepository"]
+        source_repo["sourceRepository"]
+        progress_repo["progressRepository"]
+    end
+    
+    login --> auth
+    profiles --> profile
+    home --> profile
+    detail --> player
+    search --> detail
+    
+    auth --> auth_repo
+    detail --> detail_repo
+    player --> source_repo
+    player --> progress_repo
+    
+    style screens fill:#e1f5ff
+    style providers fill:#f3e5f5
+    style repos fill:#fff3e0
+```
 
-Ne commitez jamais de `.env`, cle provider, URL provider personnalisee avec
-token, ou compose contenant des secrets en clair.
+---
 
-## Lancer l'API
+## 🚀 Installation & Démarrage
+
+### Prerequis
+```bash
+node -v         # v24+
+docker -v       # latest
+flutter -v      # 3.22+
+```
+
+### 1. Setup Backend
 
 ```bash
 cd jojoflix-api
+
+# Installer dépendances
 npm install
+
+# Configurer environnement
 cp .env.example .env
-node ace migration:run
+# Éditer .env avec:
+# - DB credentials
+# - API keys (TMDB, Real-Debrid, SubSense, etc)
+# - URLs proxy
+
+# Lancer migrations DB
+npm run ace migration:run
+
+# Démarrer backend
 npm run dev
+# Backend écoute sur http://localhost:3333
 ```
 
-L'API ecoute par defaut sur `http://localhost:3333`.
-
-Checks backend:
-
-```bash
-cd jojoflix-api
-npm run typecheck
-npm run lint
-```
-
-## Lancer l'app Flutter
+### 2. Setup Frontend (Flutter)
 
 ```bash
 cd jojoflix_app
+
+# Installer dépendances
 flutter pub get
-dart run build_runner build --delete-conflicting-outputs
-flutter run --dart-define=API_BASE_URL=http://localhost:3333
+
+# Générer fichiers build_runner
+flutter pub run build_runner build --delete-conflicting-outputs
+
+# Run sur device/simulator
+flutter run --dart-define=API_BASE_URL=http://10.0.2.2:3333
 ```
 
-Sur emulateur Android, utiliser souvent `http://10.0.2.2:3333` comme base URL.
+### 3. Docker Compose (Complet)
 
-Checks Flutter:
-
-```bash
-cd jojoflix_app
-dart format lib test
-flutter analyze
-flutter test
-```
-
-## Stack Docker
+Pour une stack complète (API + DB + Redis + Nginx):
 
 ```bash
-cp .env.example .env
+# Depuis racine du projet
 docker compose up --build -d
+
+# Logs
 docker compose logs -f api
+
+# Arrêter
+docker compose down
 ```
 
-Services par defaut:
+Services disponibles:
+- **API**: `http://localhost:3333`
+- **Web (Nginx)**: `http://localhost`
+- **DB**: `localhost:5432`
+- **Redis**: `localhost:6379`
 
-- API: `http://localhost:3333`
-- Web: `http://localhost`
-- SQLite API: volume Docker `sqlite_data`
+---
 
-Le build web Flutter doit etre produit avant de servir l'app via Nginx:
+## 📱 Builds & Déploiement
+
+### Build Android (release APK)
 
 ```bash
 cd jojoflix_app
-flutter build web --dart-define=API_BASE_URL=https://jojoflixapi.jojoserv.com
+
+flutter build apk --release \
+  --dart-define=API_BASE_URL=https://api.jojoflix.com
+
+# APK: build/app/outputs/flutter-app.apk
 ```
 
-## Deploiement
-
-Le Dockerfile de l'API attend un build Adonis deja produit:
+### Build iOS (release)
 
 ```bash
+flutter build ios --release \
+  --dart-define=API_BASE_URL=https://api.jojoflix.com
+
+# Ouvrir dans Xcode pour signing + deploy
+open ios/Runner.xcworkspace
+```
+
+### Deploy Backend
+
+```bash
+# Sur serveur, depuis /app/jojoflix-api/
+docker compose -f docker-compose.server.yml up -d --build
+
+# Vérifier health
+curl https://api.jojoflix.com/
+# {"status": "ok", "service": "jojoflix-api"}
+```
+
+---
+
+## 🔑 Variables d'environnement
+
+**Backend** (`.env`):
+```bash
+# Core
+APP_KEY=your-secret-key
+APP_URL=http://localhost:3333
+NODE_ENV=production
+
+# Database
+DB_HOST=postgres
+DB_PORT=5432
+DB_USER=jojoflix
+DB_PASSWORD=secure-pwd
+DB_DATABASE=jojoflix
+
+# Redis
+REDIS_HOST=redis
+REDIS_PORT=6379
+
+# APIs externes
+TMDB_API_KEY=your_tmdb_key
+RD_API_KEY=your_realdebrid_key
+SUBSENSE_API_KEY=your_subsense_key
+MEDIAFUSION_URL=https://provider/manifest.json
+```
+
+**App** (build-time):
+```bash
+--dart-define=API_BASE_URL=https://api.jojoflix.com
+```
+
+---
+
+## 🧪 Tests & Qualité
+
+```bash
+# Backend
 cd jojoflix-api
-npm install
-npm run build
-docker build -t jojoflix-api:latest .
+npm run typecheck    # Type checking TypeScript
+npm run lint         # ESLint
+
+# Frontend
+cd jojoflix_app
+flutter analyze      # Static analysis
+flutter test         # Unit tests
+flutter test --coverage
 ```
 
-Avant tout deploiement:
+---
 
-1. Verifier que le compose cible utilise des variables d'environnement et aucun
-   secret en clair.
-2. Verifier `CONVEX_URL`, `CONVEX_ADMIN_KEY`, `DB_PATH`, `APP_URL` et les cles
-   providers sur la machine cible.
-3. Verifier le healthcheck public: `curl https://jojoflixapi.jojoserv.com/health`.
-4. Pour un incident prod, distinguer API up et playback casse: le healthcheck
-   peut etre vert alors que Torrentio, Real-Debrid ou les sous-titres echouent.
+## 📚 Flux métier détaillés
 
-## Points d'attention
+### Profils utilisateur
 
-- Les sources streaming sont externes et peuvent etre rate-limitees ou renvoyer
-  des URLs mortes. Lire les logs provider avant de conclure a une panne API.
-- `StreamRegistry` est en memoire process; il ne doit pas etre traite comme une
-  source de verite durable.
-- Les fichiers VTT et temporaires vivent cote API, pas dans Convex.
-- Les optimisations backend doivent preserver les payloads REST consommes par
-  Flutter.
-- Un changement direct Convex-dans-Flutter implique un rebuild et doit etre
-  justifie par un gain clair.
+Chaque utilisateur peut avoir **plusieurs profils** (comme Netflix):
 
-## Contribution
-
-Avant d'ouvrir une PR ou de pousser une branche:
-
-```bash
-git status --short
-cd jojoflix-api && npm run typecheck
-cd ../jojoflix_app && flutter analyze && flutter test
+```mermaid
+graph LR
+    A["User Account"] --> B["Profile 1<br/>Moi"]
+    A --> C["Profile 2<br/>Partner"]
+    A --> D["Profile 3<br/>Kids<br/>Filtré"]
+    
+    B --> E["watch_history<br/>indépendante"]
+    C --> F["watch_history<br/>indépendante"]
+    D --> G["watch_history<br/>indépendante"]
+    
+    E --> H["Recommandations<br/>personnalisées"]
+    F --> H
+    G --> H
+    
+    style A fill:#f3e5f5
+    style B fill:#c8e6c9
+    style C fill:#c8e6c9
+    style D fill:#ffccbc
 ```
 
-Si la modification touche seulement l'API, `npm run typecheck` est le minimum.
-Si elle touche l'app, lancer aussi `dart format`, `flutter analyze` et les tests
-Flutter cibles.
+### Système de caching
 
-Voir aussi `AGENTS.md` pour les invariants de reprise, les commandes utiles et
-les pieges connus du projet. Le contexte d'import public apres developpement
-prive est detaille dans `docs/PROJECT_HISTORY.md`.
+```mermaid
+graph TD
+    A["Request"] --> B{In Redis Cache?}
+    B -->|YES| C{TTL valid?}
+    C -->|YES| D["Return cached<br/>✅ Fast"]
+    C -->|NO| E["Delete stale<br/>Fetch fresh"]
+    B -->|NO| E
+    E --> F["Process request<br/>⚙️ Compute"]
+    F --> G["Store in Redis<br/>with TTL"]
+    G --> H["Return to client"]
+    D --> H
+    
+    style D fill:#c8e6c9
+    style H fill:#e1f5ff
+```
+
+---
+
+## 🐛 Dépannage courant
+
+| Problème | Solution |
+|----------|----------|
+| **Login échoue** | Vérifier API_BASE_URL au build, certificat SSL, backend running |
+| **Pas de sources** | Vérifier Real-Debrid API key, quota atteint? |
+| **Subtitles manquent** | Vérifier SubSense API key, language code |
+| **Lag lecteur** | Réduire qualité source, vérifier bande passante |
+| **Crash au démarrage** | `flutter clean` puis rebuild, version Flutter à jour? |
+
+---
+
+## 📖 Références
+
+- **Backend**: [AdonisJS v6 Docs](https://docs.adonisjs.com/)
+- **Frontend**: [Flutter Docs](https://flutter.dev/docs)
+- **APIs**: [TMDB](https://developer.themoviedb.org/), [Real-Debrid](https://api.real-debrid.com/), [SubSense](https://subsense.dev/)
+- **Streaming**: [MediaFusion](https://mediafusion.dev/), [Torrentio](https://torrentio.stremio.com/)
+
+---
+
+**Made with ❤️ • Self-hosted streaming made simple**

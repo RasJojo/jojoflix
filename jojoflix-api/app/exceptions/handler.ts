@@ -1,11 +1,24 @@
 import app from '@adonisjs/core/services/app'
 import { type HttpContext, ExceptionHandler, errors } from '@adonisjs/core/http'
+import { errors as authErrors } from '@adonisjs/auth'
 import { errors as vineErrors } from '@vinejs/vine'
 
 export default class HttpExceptionHandler extends ExceptionHandler {
   protected debug = !app.inProduction
 
   async handle(error: unknown, ctx: HttpContext) {
+    // Auth errors → 401
+    if (error instanceof authErrors.E_UNAUTHORIZED_ACCESS) {
+      return ctx.response.status(401).json({
+        error: { code: 'AUTH_INVALID', message: 'Non authentifié', status: 401 },
+      })
+    }
+    if (error instanceof authErrors.E_INVALID_CREDENTIALS) {
+      return ctx.response.status(401).json({
+        error: { code: 'INVALID_CREDENTIALS', message: 'Email ou mot de passe incorrect', status: 401 },
+      })
+    }
+
     // Validation errors (VineJS) → 422
     if (error instanceof vineErrors.E_VALIDATION_ERROR) {
       return ctx.response.status(422).json({

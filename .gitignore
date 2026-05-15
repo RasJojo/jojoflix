@@ -12,8 +12,7 @@
 !.env.example
 !.env.*.example
 
-# Local planning artifacts
-.git-push-scenarios.local.md
+# AI / planning artifacts
 .claude/
 _bmad/
 _bmad-output/

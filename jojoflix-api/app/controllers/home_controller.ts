@@ -1,126 +1,140 @@
 import type { HttpContext } from '@adonisjs/core/http'
 import RecommendationService from '#services/recommendation_service'
 import TmdbService from '#services/tmdb_service'
-import ConvexRepository from '#services/convex_repository'
-import { rememberHomeRows } from '#services/home_cache_service'
+import WatchHistory from '#models/watch_history'
+import Profile from '#models/profile'
 
 export default class HomeController {
   private getMediaTitle(meta: { title?: string; name?: string }) {
     return meta.title ?? meta.name ?? ''
   }
 
-  async show({ betterAuthUser, params, response }: HttpContext) {
-    const user = betterAuthUser!
-    const repo = new ConvexRepository()
+  async show({ auth, params, response }: HttpContext) {
+    const user = auth.getUserOrFail()
 
-    const profile = await repo.getProfileOfUser(params.profile_id, user.id)
-    if (!profile) {
-      return response.notFound({
-        error: { code: 'NOT_FOUND', message: 'Profil introuvable', status: 404 },
+    const profile = await Profile.query()
+      .where('id', params.profile_id)
+      .where('user_id', user.id)
+      .firstOrFail()
+
+    const tmdb = new TmdbService()
+    const recommendationService = new RecommendationService()
+    const rows = await recommendationService.generateHomeRows(profile.id)
+    const watchlistEntries = Array.isArray(profile.preferences?.watchlist)
+      ? profile.preferences.watchlist
+      : []
+
+    const continueWatchingRaw = await WatchHistory.query()
+      .where('profile_id', profile.id)
+      .where('is_finished', false)
+      .where('current_time', '>', 0)
+      .orderBy('updated_at', 'desc')
+      .limit(100)
+
+    // Une seule entrée par œuvre dans "Continuer à regarder".
+    // Le tri par updated_at DESC garantit que la première occurrence
+    // correspond au dernier épisode/film consulté.
+    const seenWorks = new Set<string>()
+    const continueWatching = continueWatchingRaw
+      .filter((h) => {
+        const workKey = `${h.mediaType}:${h.tmdbId}`
+        if (seenWorks.has(workKey)) return false
+        seenWorks.add(workKey)
+        return true
       })
-    }
+      .slice(0, 20)
 
-    const allRows = await rememberHomeRows(profile._id, async () => {
-      const tmdb = new TmdbService()
-      const recommendationService = new RecommendationService()
-      const metadataCache = new Map<string, Promise<any>>()
-      const getMetadata = (mediaType: 'movie' | 'tv', tmdbId: string) => {
-        const key = `${mediaType}:${tmdbId}`
-        const existing = metadataCache.get(key)
-        if (existing) return existing
-        const promise =
-          mediaType === 'tv' ? tmdb.getTvShow(Number(tmdbId)) : tmdb.getMovie(Number(tmdbId))
-        metadataCache.set(key, promise)
-        return promise
-      }
-
-      const [rows, continueWatchingRaw] = await Promise.all([
-        recommendationService.generateHomeRows(profile._id),
-        repo.getActiveWatchHistory(profile._id),
-      ])
-      const watchlistEntries = Array.isArray(profile.preferences?.watchlist)
-        ? profile.preferences.watchlist
-        : []
-
-      const seenWorks = new Set<string>()
-      const continueWatching = continueWatchingRaw
-        .filter((h) => {
-          const workKey = `${h.mediaType}:${h.tmdbId}`
-          if (seenWorks.has(workKey)) return false
-          seenWorks.add(workKey)
-          return true
-        })
-        .slice(0, 20)
-
-      const enrichedContinue = await Promise.all(
-        continueWatching.map(async (h) => {
-          try {
-            const meta = await getMetadata(h.mediaType, h.tmdbId)
-            return {
-              tmdb_id: h.tmdbId,
-              media_type: h.mediaType,
-              title: meta.title ?? meta.name,
-              poster_url: meta.poster_url,
-              backdrop_url: meta.backdrop_url,
-              season_num: h.seasonNum,
-              episode_num: h.episodeNum,
-              current_time: h.currentTime,
-              total_duration: h.totalDuration,
-              progress: h.totalDuration > 0 ? h.currentTime / h.totalDuration : 0,
-            }
-          } catch {
-            return null
+    // Enrichir avec les métadonnées TMDB (titre, poster, backdrop)
+    const enrichedContinue = await Promise.all(
+      continueWatching.map(async (h) => {
+        try {
+          let meta: any
+          if (h.mediaType === 'movie') {
+            meta = await tmdb.getMovie(Number(h.tmdbId))
+          } else {
+            meta = await tmdb.getTvShow(Number(h.tmdbId))
           }
-        })
-      )
-
-      const enrichedWatchlist = await Promise.all(
-        watchlistEntries.slice(0, 20).map(async (entry: any) => {
-          try {
-            const mediaType = entry?.media_type === 'tv' ? 'tv' : 'movie'
-            const tmdbId = String(entry?.tmdb_id ?? '').trim()
-            if (!tmdbId) return null
-
-            const meta = await getMetadata(mediaType, tmdbId)
-
-            return {
-              tmdb_id: tmdbId,
-              media_type: mediaType,
-              title: this.getMediaTitle(meta),
-              poster_url: meta.poster_url,
-              backdrop_url: meta.backdrop_url,
-              current_time: null,
-              total_duration: null,
-              progress: null,
-            }
-          } catch {
-            return null
+          return {
+            tmdb_id: h.tmdbId,
+            media_type: h.mediaType,
+            title: meta.title ?? meta.name,
+            poster_url: meta.poster_url,
+            backdrop_url: meta.backdrop_url,
+            season_num: h.seasonNum,
+            episode_num: h.episodeNum,
+            current_time: h.currentTime,
+            total_duration: h.totalDuration,
+            progress: h.totalDuration > 0 ? h.currentTime / h.totalDuration : 0,
           }
-        })
-      )
+        } catch {
+          return {
+            tmdb_id: h.tmdbId,
+            media_type: h.mediaType,
+            title: h.tmdbId,
+            poster_url: null,
+            backdrop_url: null,
+            season_num: h.seasonNum,
+            episode_num: h.episodeNum,
+            current_time: h.currentTime,
+            total_duration: h.totalDuration,
+            progress: h.totalDuration > 0 ? h.currentTime / h.totalDuration : 0,
+          }
+        }
+      })
+    )
 
-      const watchlistItems = enrichedWatchlist.filter(
-        (item): item is NonNullable<typeof item> => item !== null
-      )
-      const continueItems = enrichedContinue.filter(
-        (item): item is NonNullable<typeof item> => item !== null
-      )
+    const enrichedWatchlist = await Promise.all(
+      watchlistEntries.slice(0, 20).map(async (entry: any) => {
+        try {
+          const mediaType = entry?.media_type === 'tv' ? 'tv' : 'movie'
+          const tmdbId = String(entry?.tmdb_id ?? '').trim()
+          if (!tmdbId) return null
 
-      return [
-        ...(continueItems.length > 0
-          ? [{ type: 'continue_watching', title: 'Continuer de regarder', items: continueItems }]
-          : []),
-        ...(watchlistItems.length > 0
-          ? [{ type: 'watchlist', title: 'Ma liste', items: watchlistItems }]
-          : []),
-        ...rows,
-      ]
-    })
+          const meta =
+            mediaType === 'tv'
+              ? await tmdb.getTvShow(Number(tmdbId))
+              : await tmdb.getMovie(Number(tmdbId))
+
+          return {
+            tmdb_id: tmdbId,
+            media_type: mediaType,
+            title: this.getMediaTitle(meta),
+            poster_url: meta.poster_url,
+            backdrop_url: meta.backdrop_url,
+            current_time: null,
+            total_duration: null,
+            progress: null,
+          }
+        } catch {
+          return null
+        }
+      })
+    )
+
+    const watchlistItems = enrichedWatchlist.filter((item): item is NonNullable<typeof item> => item !== null)
+
+    const allRows = [
+      ...(enrichedContinue.length > 0
+        ? [{ type: 'continue_watching', title: 'Continuer de regarder', items: enrichedContinue }]
+        : []),
+      ...(watchlistItems.length > 0
+        ? [
+            {
+              type: 'watchlist',
+              title: 'Ma liste',
+              items: watchlistItems,
+            },
+          ]
+        : []),
+      ...rows,
+    ]
 
     return response.ok({ data: { rows: allRows } })
   }
 
-  async browse({ params, response }: HttpContext) {
+  async browse({ auth, params, response }: HttpContext) {
+    auth.getUserOrFail()
+
     const mediaType = params.mediaType as 'movie' | 'tv'
     if (mediaType !== 'movie' && mediaType !== 'tv') {
       return response.badRequest({ message: 'mediaType must be movie or tv' })
@@ -163,7 +177,7 @@ export default class HomeController {
       progress: null,
     })
 
-    const browseRows = [
+    const rows = [
       {
         type: 'trending',
         title: mediaType === 'movie' ? 'Films tendance' : 'Séries tendance',
@@ -176,6 +190,6 @@ export default class HomeController {
       })),
     ]
 
-    return response.ok({ data: { rows: browseRows } })
+    return response.ok({ data: { rows } })
   }
 }

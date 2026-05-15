@@ -33,10 +33,11 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     final profileRepo = ref.read(profileRepositoryProvider);
     final watchlistRepo = ref.read(watchlistRepositoryProvider);
     final prefs = ref.read(sharedPreferencesProvider);
-    final activeProfileId = prefs.getString('active_profile_id');
+    final activeProfileId =
+        int.tryParse(prefs.getString('active_profile_id') ?? '');
     final profiles = await profileRepo.getProfiles();
 
-    if (activeProfileId == null || activeProfileId.isEmpty) {
+    if (activeProfileId == null || activeProfileId <= 0) {
       return _ProfilePageData(
         profiles: profiles,
         activeProfileId: null,
@@ -52,7 +53,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     );
   }
 
-  Future<void> _switchProfile(String profileId) async {
+  Future<void> _switchProfile(int profileId) async {
     await ref.read(profileRepositoryProvider).selectProfile(profileId);
     ref.invalidate(homeRowsProvider);
     if (!mounted) return;
@@ -60,9 +61,10 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   }
 
   Future<void> _removeFromWatchlist(WatchlistItem item) async {
-    final activeProfileId =
-        ref.read(sharedPreferencesProvider).getString('active_profile_id');
-    if (activeProfileId == null || activeProfileId.isEmpty) return;
+    final activeProfileId = int.tryParse(
+      ref.read(sharedPreferencesProvider).getString('active_profile_id') ?? '',
+    );
+    if (activeProfileId == null || activeProfileId <= 0) return;
 
     await ref
         .read(watchlistRepositoryProvider)
@@ -220,7 +222,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
 
 class _ProfilePageData {
   final List<ProfileModel> profiles;
-  final String? activeProfileId;
+  final int? activeProfileId;
   final List<WatchlistItem> watchlist;
 
   const _ProfilePageData({

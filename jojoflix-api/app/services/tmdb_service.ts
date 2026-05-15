@@ -1,5 +1,6 @@
 import env from '#start/env'
 import CacheWrapper, { CACHE_TTL } from '#services/cache_wrapper'
+import got from 'got'
 
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3'
 const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p'
@@ -142,14 +143,11 @@ export default class TmdbService {
       const data = await this.fetch<any>(`/tv/${tmdbId}`, {
         append_to_response: 'credits,videos',
       })
-      const seasonResults = await Promise.allSettled(
+      const seasons = await Promise.all(
         (data.seasons ?? [])
           .filter((s: any) => s.season_number > 0)
           .map((s: any) => this.getTvSeason(tmdbId, s.season_number))
       )
-      const seasons = seasonResults
-        .filter((r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled')
-        .map((r) => r.value)
       return {
         tmdb_id: data.id,
         title: data.name,
@@ -545,12 +543,11 @@ export default class TmdbService {
   }
 
   private async fetch<T>(path: string, params: Record<string, string> = {}): Promise<T> {
-    const url = new URL(`${TMDB_BASE_URL}${path}`)
-    const allParams = { api_key: this.apiKey, language: 'fr-FR', ...params }
-    for (const [k, v] of Object.entries(allParams)) url.searchParams.set(k, v)
-    const res = await fetch(url.toString())
-    if (!res.ok) throw new Error(`TMDB HTTP ${res.status} on ${path}`)
-    return res.json() as Promise<T>
+    return got
+      .get(`${TMDB_BASE_URL}${path}`, {
+        searchParams: { api_key: this.apiKey, language: 'fr-FR', ...params },
+      })
+      .json<T>()
   }
 }
 // TMDB

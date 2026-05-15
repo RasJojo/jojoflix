@@ -5,7 +5,7 @@ const OSUB_BASE = 'https://api.opensubtitles.com/api/v1'
 const OSUB_USER_AGENT = 'JojoFlix v1.0'
 
 export interface SubtitleEntry {
-  file_id: string
+  file_id: number
   language: string
   release_name: string
   hearing_impaired: boolean
@@ -38,9 +38,6 @@ export default class SubtitlesService {
   constructor() {
     this.cache = new CacheWrapper()
     this.apiKey = process.env.OPENSUBS_API_KEY ?? ''
-    if (!this.apiKey) {
-      console.warn('[subtitles:opensubtitles] OPENSUBS_API_KEY is not set — subtitle requests will fail')
-    }
   }
 
   async listSubtitles(imdbId: string, season?: number, episode?: number): Promise<SubtitleEntry[]> {
@@ -83,7 +80,7 @@ export default class SubtitlesService {
 
         const releaseName = attrs.release || attrs.feature_details?.movie_name || file.file_name || 'Unknown'
         entries.push({
-          file_id: String(file.file_id),
+          file_id: file.file_id,
           language: this.normalizeLanguage(attrs.language),
           release_name: releaseName,
           hearing_impaired: attrs.hearing_impaired ?? false,
@@ -97,24 +94,15 @@ export default class SubtitlesService {
     return entries
   }
 
-  async downloadSubtitle(fileId: string, language: string): Promise<SubtitleResult> {
-    const numericId = Number(fileId)
-    if (!Number.isNaN(numericId) && Number.isInteger(numericId) && numericId > 0) {
-      const isOssub = await this.cache.get<boolean>(`subtitles:ossub:${numericId}`)
-      if (isOssub) {
-        const link = await this.getOsubDownloadLink(numericId)
-        return { url: link, language: this.normalizeLanguage(language) }
-      }
-      // ossub flag may have expired from cache (24h TTL) — attempt direct download
-      // rather than silently failing with "Subtitle not found".
-      try {
-        const link = await this.getOsubDownloadLink(numericId)
-        return { url: link, language: this.normalizeLanguage(language) }
-      } catch {
-        // Not an OpenSubtitles file_id — fall through to url cache lookup
-      }
+  async downloadSubtitle(fileId: number, language: string): Promise<SubtitleResult> {
+    const isOssub = await this.cache.get<boolean>(`subtitles:ossub:${fileId}`)
+
+    if (isOssub) {
+      const link = await this.getOsubDownloadLink(fileId)
+      return { url: link, language: this.normalizeLanguage(language) }
     }
 
+    // Fallback: anciens sous-titres SubSense encore en cache Redis
     const cachedUrl = await this.cache.get<string>(`subtitles:url:${fileId}`)
     if (!cachedUrl) throw new Error(`Subtitle not found for file_id=${fileId}`)
     return { url: cachedUrl, language: this.normalizeLanguage(language) }

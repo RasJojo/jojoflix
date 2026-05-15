@@ -1,49 +1,36 @@
-import { auth, toWebHeaders } from '#services/better_auth'
+import User from '#models/user'
 import StreamRegistry from '#services/stream_registry'
 import { loginValidator } from '#validators/user'
 import type { HttpContext } from '@adonisjs/core/http'
+import UserTransformer from '#transformers/user_transformer'
 
 export default class AccessTokenController {
-  async store({ request, response }: HttpContext) {
+  async store({ request, serialize }: HttpContext) {
     const { email, password } = await request.validateUsing(loginValidator)
 
-    const headers = new Headers({ 'content-type': 'application/json' })
-    const webReq = new Request('http://localhost/api/auth/sign-in/email', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ email, password }),
+    const user = await User.verifyCredentials(email, password)
+    const token = await User.accessTokens.create(user)
+
+    return serialize({
+      user: UserTransformer.transform(user),
+      token: token.value!.release(),
     })
+  }
 
-    const webRes = await auth.handler(webReq)
+  async destroy({ auth, response }: HttpContext) {
+    const user = auth.getUserOrFail()
 
-    if (!webRes.ok) {
-      const body = await webRes.json().catch(() => ({}))
-      return response.status(webRes.status).json({
-        error: { code: 'AUTH_FAILED', message: (body as any).message ?? 'Email ou mot de passe invalide', status: webRes.status },
-      })
+    // Couper le flux actif Redis AVANT de révoquer le token
+    const registry = new StreamRegistry()
+    await registry.clear(user.id)
+
+    if (user.currentAccessToken) {
+      await User.accessTokens.delete(user, user.currentAccessToken.identifier)
     }
 
-    const data = (await webRes.json()) as { user: { id: string; name: string; email: string } }
-    const token = webRes.headers.get('set-auth-token')
-
     return response.ok({
-      data: {
-        user: { id: data.user.id, fullName: data.user.name, email: data.user.email },
-        token,
-      },
+      data: { message: 'Déconnecté avec succès' },
     })
   }
-
-  async destroy({ betterAuthUser, request, response }: HttpContext) {
-    if (!betterAuthUser) return response.unauthorized({ error: { code: 'AUTH_REQUIRED', status: 401 } })
-
-    const registry = new StreamRegistry()
-    await registry.clear(betterAuthUser.id)
-
-    const headers = toWebHeaders(request.headers())
-    const webReq = new Request('http://localhost/api/auth/sign-out', { method: 'POST', headers })
-    await auth.handler(webReq)
-
-    return response.ok({ data: { message: 'Déconnecté avec succès' } })
-  }
 }
+// Auth controller

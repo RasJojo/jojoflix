@@ -1,24 +1,25 @@
 import type { HttpContext } from '@adonisjs/core/http'
-import ConvexRepository, { type ConvexProfile } from '#services/convex_repository'
+import Profile from '#models/profile'
 import StreamRegistry from '#services/stream_registry'
 import { createProfileValidator, updateProfileValidator } from '#validators/profile'
 
 const MAX_PROFILES_PER_USER = 5
 
 export default class ProfilesController {
-  async index({ betterAuthUser, response }: HttpContext) {
-    const user = betterAuthUser!
-    const repo = new ConvexRepository()
-    const profiles = await repo.getProfilesByUser(user.id)
-    profiles.sort((a, b) => a.createdAtMs - b.createdAtMs)
-    return response.ok({ data: profiles.map((p) => this.serialize(p)) })
+  async index({ auth, response }: HttpContext) {
+    const user = auth.getUserOrFail()
+    const profiles = await Profile.query().where('user_id', user.id).orderBy('created_at', 'asc')
+
+    return response.ok({
+      data: profiles.map((p) => this.serialize(p)),
+    })
   }
 
-  async store({ betterAuthUser, request, response }: HttpContext) {
-    const user = betterAuthUser!
-    const repo = new ConvexRepository()
+  async store({ auth, request, response }: HttpContext) {
+    const user = auth.getUserOrFail()
 
-    const count = await repo.countProfilesByUser(user.id)
+    const existing = await Profile.query().where('user_id', user.id).count('* as total')
+    const count = Number(existing[0].$extras.total)
     if (count >= MAX_PROFILES_PER_USER) {
       return response.conflict({
         error: {
@@ -30,7 +31,7 @@ export default class ProfilesController {
     }
 
     const data = await request.validateUsing(createProfileValidator)
-    const profile = await repo.createProfile({
+    const profile = await Profile.create({
       userId: user.id,
       name: data.name,
       avatarUrl: data.avatar_url ?? null,
@@ -41,34 +42,31 @@ export default class ProfilesController {
     return response.created({ data: this.serialize(profile) })
   }
 
-  async update({ betterAuthUser, params, request, response }: HttpContext) {
-    const user = betterAuthUser!
-    const repo = new ConvexRepository()
-    const profile = await repo.getProfileOfUser(params.id, user.id)
-
-    if (!profile) {
-      return response.forbidden({
-        error: { code: 'FORBIDDEN', message: 'Profil introuvable', status: 403 },
-      })
-    }
+  async update({ auth, params, request, response }: HttpContext) {
+    const user = auth.getUserOrFail()
+    const profile = await Profile.query()
+      .where('id', params.id)
+      .where('user_id', user.id)
+      .firstOrFail()
 
     const data = await request.validateUsing(updateProfileValidator)
-    const updated = await repo.updateProfile(profile._id, {
-      name: data.name ?? undefined,
-      avatarUrl: data.avatar_url !== undefined ? (data.avatar_url ?? null) : undefined,
-      isKids: data.is_kids ?? undefined,
+
+    profile.merge({
+      name: data.name ?? profile.name,
+      avatarUrl: data.avatar_url !== undefined ? (data.avatar_url ?? null) : profile.avatarUrl,
+      isKids: data.is_kids ?? profile.isKids,
       preferences: data.preferences
         ? { ...profile.preferences, ...data.preferences }
-        : undefined,
+        : profile.preferences,
     })
+    await profile.save()
 
-    return response.ok({ data: this.serialize(updated) })
+    return response.ok({ data: this.serialize(profile) })
   }
 
-  async destroy({ betterAuthUser, params, response }: HttpContext) {
-    const user = betterAuthUser!
-    const repo = new ConvexRepository()
-    const profiles = await repo.getProfilesByUser(user.id)
+  async destroy({ auth, params, response }: HttpContext) {
+    const user = auth.getUserOrFail()
+    const profiles = await Profile.query().where('user_id', user.id)
 
     if (profiles.length <= 1) {
       return response.conflict({
@@ -80,34 +78,31 @@ export default class ProfilesController {
       })
     }
 
-    const profile = profiles.find((p) => p._id === params.id)
+    const profile = profiles.find((p) => p.id === Number(params.id))
     if (!profile) {
       return response.forbidden({
         error: { code: 'FORBIDDEN', message: 'Profil introuvable', status: 403 },
       })
     }
 
-    await repo.deleteProfile(profile._id)
+    await profile.delete()
     return response.ok({ data: { message: 'Profil supprimé' } })
   }
 
-  async select({ betterAuthUser, params, response }: HttpContext) {
-    const user = betterAuthUser!
-    const repo = new ConvexRepository()
-    const profile = await repo.getProfileOfUser(params.id, user.id)
+  async select({ auth, params, response }: HttpContext) {
+    const user = auth.getUserOrFail()
+    const profile = await Profile.query()
+      .where('id', params.id)
+      .where('user_id', user.id)
+      .firstOrFail()
 
-    if (!profile) {
-      return response.notFound({
-        error: { code: 'NOT_FOUND', message: 'Profil introuvable', status: 404 },
-      })
-    }
-
+    // Couper tout flux actif précédent lors du switch de profil
     const registry = new StreamRegistry()
     await registry.clear(user.id)
 
     return response.ok({
       data: {
-        profile_id: profile._id,
+        profile_id: profile.id,
         name: profile.name,
         is_kids: profile.isKids,
         preferences: profile.preferences,
@@ -115,14 +110,15 @@ export default class ProfilesController {
     })
   }
 
-  private serialize(profile: ConvexProfile) {
+  private serialize(profile: Profile) {
     return {
-      id: profile._id,
+      id: profile.id,
       name: profile.name,
-      avatar_url: profile.avatarUrl ?? null,
+      avatar_url: profile.avatarUrl,
       is_kids: profile.isKids,
       preferences: profile.preferences,
-      created_at: new Date(profile.createdAtMs).toISOString(),
+      created_at: profile.createdAt,
     }
   }
 }
+// Profiles

@@ -1,10 +1,11 @@
 import type { HttpContext } from '@adonisjs/core/http'
 import TmdbService from '#services/tmdb_service'
-import ConvexRepository from '#services/convex_repository'
+import WatchHistory from '#models/watch_history'
+import Profile from '#models/profile'
 
 export default class MediaController {
-  async show({ betterAuthUser, params, request, response }: HttpContext) {
-    const user = betterAuthUser!
+  async show({ auth, params, request, response }: HttpContext) {
+    const user = auth.getUserOrFail()
     const { mediaType, tmdbId } = params
     const tmdb = new TmdbService()
 
@@ -14,21 +15,25 @@ export default class MediaController {
     } else if (mediaType === 'tv') {
       detail = await tmdb.getTvDetail(Number(tmdbId))
     } else {
-      return response.badRequest({
-        error: { code: 'INVALID_MEDIA_TYPE', message: 'mediaType doit être movie ou tv', status: 400 },
-      })
+      return response.badRequest({ error: { code: 'INVALID_MEDIA_TYPE', message: 'mediaType doit être movie ou tv', status: 400 } })
     }
 
+    // Enrichir les épisodes avec la progression du profil actif
     if (mediaType === 'tv' && detail.seasons?.length > 0) {
       const profileIdHeader = request.header('x-profile-id')
-      const profileId = profileIdHeader?.trim() || null
+      const profileId = profileIdHeader ? Number(profileIdHeader) : null
 
       if (profileId) {
-        const repo = new ConvexRepository()
-        const profile = await repo.getProfileOfUser(profileId, user.id)
+        const profile = await Profile.query()
+          .where('id', profileId)
+          .where('user_id', user.id)
+          .first()
 
         if (profile) {
-          const histories = await repo.getWatchHistoriesByTmdb(profile._id, tmdbId, 'tv')
+          const histories = await WatchHistory.query()
+            .where('profile_id', profile.id)
+            .where('tmdb_id', tmdbId)
+            .where('media_type', 'tv')
 
           const progressMap = new Map<string, number>()
           for (const h of histories) {
@@ -51,7 +56,8 @@ export default class MediaController {
     return response.ok({ data: detail })
   }
 
-  async search({ request, response }: HttpContext) {
+  async search({ auth, request, response }: HttpContext) {
+    auth.getUserOrFail()
     const query = request.input('q', '').trim()
 
     if (query.length < 2) {
@@ -63,3 +69,5 @@ export default class MediaController {
     return response.ok({ data: results })
   }
 }
+// Media
+// Search

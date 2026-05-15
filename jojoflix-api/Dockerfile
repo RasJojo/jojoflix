@@ -8,4 +8,4 @@ COPY package*.json ./
 RUN npm ci --legacy-peer-deps
 
 EXPOSE 3333
-CMD ["sh", "-c", "node bin/console.js migration:run --force && node bin/server.js"]
+CMD ["node", "bin/server.js"]

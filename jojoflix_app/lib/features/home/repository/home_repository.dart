@@ -72,7 +72,7 @@ class HomeRepository {
   final ApiClient apiClient;
   HomeRepository({required this.apiClient});
 
-  Future<List<HomeRow>> getHomeRows(String profileId) async {
+  Future<List<HomeRow>> getHomeRows(int profileId) async {
     final response = await apiClient.dio.get('/api/home/$profileId');
     final data = response.data['data']['rows'] as List;
     return data

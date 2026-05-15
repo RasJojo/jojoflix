@@ -1,9 +1,33 @@
 import type { HttpContext } from '@adonisjs/core/http'
 import StreamRegistry from '#services/stream_registry'
-import ffmpegLimiter from '#services/ffmpeg_limiter'
-import { auth as betterAuth } from '#services/better_auth'
-import { extractSubtitleTrackAsVtt, probeMediaInfo } from '#services/media_probe_service'
+import User from '#models/user'
+import { Secret } from '@adonisjs/core/helpers'
 import { spawn } from 'node:child_process'
+
+interface AudioTrackInfoPayload {
+  index: number
+  stream_index: number
+  language: string | null
+  title: string | null
+  codec: string
+  channels: number
+}
+
+interface SubtitleTrackInfoPayload {
+  index: number
+  stream_index: number
+  language: string | null
+  title: string | null
+  codec: string
+  forced: boolean
+  default: boolean
+}
+
+interface MediaInfoPayload {
+  duration_seconds: number | null
+  audio_tracks: AudioTrackInfoPayload[]
+  subtitle_tracks: SubtitleTrackInfoPayload[]
+}
 
 export default class TranscodeController {
   private readonly registry: StreamRegistry
@@ -16,9 +40,8 @@ export default class TranscodeController {
    * GET /api/transcode/info
    * Retourne la durée + les pistes audio/sous-titres d'un flux actif.
    */
-  async info(ctx: HttpContext) {
-    const { request, response } = ctx
-    const userId = await this.resolveUserId(ctx)
+  async info({ auth, request, response }: HttpContext) {
+    const userId = await this.resolveUserId(auth, request)
     if (!userId) {
       return response.unauthorized({
         error: { code: 'AUTH_INVALID', message: 'Non authentifié', status: 401 },
@@ -46,9 +69,8 @@ export default class TranscodeController {
    * GET /api/transcode/tracks
    * Compat historique: retourne uniquement la liste audio.
    */
-  async tracks(ctx: HttpContext) {
-    const { request, response } = ctx
-    const userId = await this.resolveUserId(ctx)
+  async tracks({ auth, request, response }: HttpContext) {
+    const userId = await this.resolveUserId(auth, request)
     if (!userId) {
       return response.unauthorized({
         error: { code: 'AUTH_INVALID', message: 'Non authentifié', status: 401 },
@@ -76,9 +98,8 @@ export default class TranscodeController {
    * GET /api/transcode/subtitle?track=0
    * Exporte une piste de sous-titres intégrée en WebVTT pour le web player.
    */
-  async subtitle(ctx: HttpContext) {
-    const { request, response } = ctx
-    const userId = await this.resolveUserId(ctx)
+  async subtitle({ auth, request, response }: HttpContext) {
+    const userId = await this.resolveUserId(auth, request)
     if (!userId) {
       return response.unauthorized({
         error: { code: 'AUTH_INVALID', message: 'Non authentifié', status: 401 },
@@ -92,20 +113,16 @@ export default class TranscodeController {
       })
     }
 
-    const MAX_SUBTITLE_TRACK_INDEX = 100
     const rawTrack = Number(request.input('track', -1))
     const trackIndex = Number.isFinite(rawTrack) ? Math.floor(rawTrack) : -1
-    if (trackIndex < 0 || trackIndex > MAX_SUBTITLE_TRACK_INDEX) {
+    if (trackIndex < 0) {
       return response.badRequest({
         error: { code: 'INVALID_SUBTITLE_TRACK', message: 'track invalide', status: 400 },
       })
     }
 
-    const abortController = new AbortController()
-    response.response.once('close', () => abortController.abort())
-
     try {
-      const vtt = await extractSubtitleTrackAsVtt(directUrl, trackIndex, abortController.signal)
+      const vtt = await extractSubtitleTrackAsVtt(directUrl, trackIndex)
       if (!vtt) {
         return response.notFound({
           error: {
@@ -136,9 +153,8 @@ export default class TranscodeController {
    * Streame la vidéo avec la piste audio sélectionnée via FFmpeg.
    * Retranscode l'audio en AAC, copie la vidéo (pas de re-encode).
    */
-  async audio(ctx: HttpContext) {
-    const { request, response } = ctx
-    const userId = await this.resolveUserId(ctx)
+  async audio({ auth, request, response }: HttpContext) {
+    const userId = await this.resolveUserId(auth, request)
     if (!userId) {
       return response.unauthorized({
         error: { code: 'AUTH_INVALID', message: 'Non authentifié', status: 401 },
@@ -152,21 +168,7 @@ export default class TranscodeController {
       })
     }
 
-    if (!ffmpegLimiter.acquire()) {
-      return response.serviceUnavailable({
-        error: { code: 'TRANSCODE_BUSY', message: 'Trop de transcodes en cours', status: 503 },
-      })
-    }
-
-    const MAX_TRACK_INDEX = 100
-    const rawTrackAudio = Number(request.input('track', 0))
-    const trackIndex = Number.isFinite(rawTrackAudio) ? Math.floor(rawTrackAudio) : 0
-    if (trackIndex < 0 || trackIndex > MAX_TRACK_INDEX) {
-      ffmpegLimiter.release()
-      return response.badRequest({
-        error: { code: 'INVALID_TRACK', message: 'Indice de piste audio invalide', status: 400 },
-      })
-    }
+    const trackIndex = Number(request.input('track', 0))
 
     response.response.setHeader('Content-Type', 'video/mp4')
     response.response.setHeader('Transfer-Encoding', 'chunked')
@@ -202,36 +204,17 @@ export default class TranscodeController {
 
     const ff = spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'ignore'] })
 
-    // BUG #1 fix: hard 4-hour deadline ensures the limiter slot is always released
-    // even when the upstream TCP connection dies silently without a clean close.
-    const killTimer = setTimeout(() => ff.kill('SIGKILL'), 4 * 60 * 60 * 1000)
+    ff.stdout.pipe(response.response)
+    response.response.on('close', () => ff.kill('SIGKILL'))
 
-    try {
-      response.response.once('close', () => ff.kill('SIGKILL'))
-      ff.stdout.pipe(response.response)
-
-      await new Promise<void>((resolve) => {
-        ff.on('close', (code) => {
-          // BUG #2 fix: if ffmpeg exits non-zero and headers haven't been sent yet,
-          // send a 502 error to prevent silent corrupt data from reaching the client.
-          if (code !== 0 && !response.response.headersSent) {
-            response.response.writeHead(502, { 'Content-Type': 'application/json' })
-            response.response.end(JSON.stringify({
-              error: { code: 'TRANSCODE_FAILED', message: 'FFmpeg a échoué', status: 502 },
-            }))
-          }
-          resolve()
-        })
-        ff.on('error', resolve)
-      })
-    } finally {
-      clearTimeout(killTimer)
-      ffmpegLimiter.release()
-    }
+    await new Promise<void>((resolve) => {
+      ff.on('close', resolve)
+      ff.on('error', resolve)
+    })
   }
 
   private async resolveDirectUrl(
-    userId: string,
+    userId: number,
     request: HttpContext['request']
   ): Promise<string | null> {
     const requestedStreamId = String(request.input('stream_id') ?? '').trim()
@@ -241,24 +224,162 @@ export default class TranscodeController {
     )
   }
 
-  private async resolveUserId(ctx: HttpContext): Promise<string | null> {
-    if (ctx.betterAuthUser) return ctx.betterAuthUser.id
-
-    const authHeader = ctx.request.header('authorization') ?? ctx.request.header('Authorization')
-    let token: string | null = null
-    if (authHeader) {
-      const match = authHeader.match(/^Bearer\s+(.+)$/i)
-      if (match?.[1]) token = match[1].trim()
+  private async resolveUserId(
+    auth: HttpContext['auth'],
+    request: HttpContext['request']
+  ): Promise<number | null> {
+    try {
+      const user = auth.getUserOrFail() as User
+      return user.id
+    } catch {
+      // fallback query token
     }
-    if (!token) {
-      const queryToken = ctx.request.input('token') as string | undefined
-      token = queryToken && queryToken.trim().length > 0 ? queryToken.trim() : null
-    }
-    if (!token) return null
 
-    const session = await betterAuth.api
-      .getSession({ headers: new Headers({ authorization: `Bearer ${token}` }) })
-      .catch(() => null)
-    return session?.user.id ?? null
+    const queryToken = request.input('token') as string | undefined
+    if (!queryToken) return null
+
+    const accessToken = await User.accessTokens.verify(new Secret(queryToken))
+    if (!accessToken || accessToken.isExpired()) return null
+
+    return Number(accessToken.tokenableId)
   }
+}
+
+async function probeMediaInfo(url: string): Promise<MediaInfoPayload> {
+  const info = await runFfprobe(url)
+  const streams = Array.isArray(info.streams) ? info.streams : []
+  const formatDuration = Number(info.format?.duration)
+
+  const audioTracks: AudioTrackInfoPayload[] = streams
+    .filter((stream: any) => stream.codec_type === 'audio')
+    .map((stream: any, index: number) => ({
+      index,
+      stream_index: Number(stream.index ?? index),
+      language: stream.tags?.language ?? null,
+      title: stream.tags?.title ?? null,
+      codec: String(stream.codec_name ?? ''),
+      channels: Number(stream.channels ?? 0),
+    }))
+
+  const subtitleTracks: SubtitleTrackInfoPayload[] = streams
+    .filter((stream: any) => stream.codec_type === 'subtitle')
+    .map((stream: any, index: number) => ({
+      index,
+      stream_index: Number(stream.index ?? index),
+      language: stream.tags?.language ?? null,
+      title: stream.tags?.title ?? null,
+      codec: String(stream.codec_name ?? ''),
+      forced: Boolean(stream.disposition?.forced),
+      default: Boolean(stream.disposition?.default),
+    }))
+
+  return {
+    duration_seconds:
+      Number.isFinite(formatDuration) && formatDuration > 0
+        ? formatDuration
+        : extractFallbackDurationSeconds(streams),
+    audio_tracks: audioTracks,
+    subtitle_tracks: subtitleTracks,
+  }
+}
+
+function extractFallbackDurationSeconds(streams: any[]): number | null {
+  let best = 0
+  for (const stream of streams) {
+    const value = Number(stream?.duration)
+    if (Number.isFinite(value) && value > best) {
+      best = value
+    }
+  }
+  return best > 0 ? best : null
+}
+
+async function extractSubtitleTrackAsVtt(url: string, trackIndex: number): Promise<string | null> {
+  return await new Promise<string | null>((resolve, reject) => {
+    const args = [
+      '-nostdin',
+      '-i',
+      url,
+      '-vn',
+      '-an',
+      '-map',
+      `0:s:${trackIndex}?`,
+      '-c:s',
+      'webvtt',
+      '-f',
+      'webvtt',
+      'pipe:1',
+    ]
+    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'ignore'] })
+    let out = ''
+    const timer = setTimeout(() => {
+      proc.kill('SIGKILL')
+      reject(new Error('subtitle export timeout'))
+    }, 60_000)
+
+    proc.stdout.on('data', (chunk: Buffer) => {
+      if (out.length < 1_500_000) {
+        out += chunk.toString()
+      }
+    })
+    proc.on('close', (code) => {
+      clearTimeout(timer)
+      if ((code ?? 1) !== 0 || !out.trim()) {
+        resolve(null)
+        return
+      }
+      resolve(normalizeWebVtt(out))
+    })
+    proc.on('error', (error) => {
+      clearTimeout(timer)
+      reject(error)
+    })
+  })
+}
+
+function normalizeWebVtt(raw: string): string {
+  const text = raw.replaceAll('\r\n', '\n').replaceAll('\r', '\n').replaceAll('\uFEFF', '')
+  const trimmed = text.trimLeft()
+  if (trimmed.toUpperCase().startsWith('WEBVTT')) {
+    return trimmed
+  }
+  return `WEBVTT\n\n${trimmed}`
+}
+
+async function runFfprobe(url: string): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const args = [
+      '-v',
+      'quiet',
+      '-print_format',
+      'json',
+      '-show_streams',
+      '-show_format',
+      '-analyzeduration',
+      '2500000',
+      '-probesize',
+      '2500000',
+      url,
+    ]
+    const proc = spawn('ffprobe', args)
+    let out = ''
+    const timer = setTimeout(() => {
+      proc.kill('SIGKILL')
+      reject(new Error('ffprobe timeout'))
+    }, 8_000)
+    proc.stdout.on('data', (d: Buffer) => (out += d.toString()))
+    proc.on('close', (code) => {
+      clearTimeout(timer)
+      if (code !== 0 || !out) return reject(new Error('ffprobe failed'))
+      try {
+        resolve(JSON.parse(out))
+      } catch {
+        reject(new Error('ffprobe parse error'))
+      }
+    })
+    proc.on('error', (error) => {
+      clearTimeout(timer)
+      reject(error)
+    })
+  })
 }

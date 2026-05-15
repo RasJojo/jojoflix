@@ -38,7 +38,7 @@ class WatchlistRepository {
   final ApiClient apiClient;
   WatchlistRepository({required this.apiClient});
 
-  Future<List<WatchlistItem>> getWatchlist(String profileId) async {
+  Future<List<WatchlistItem>> getWatchlist(int profileId) async {
     final response =
         await apiClient.dio.get('/api/profiles/$profileId/watchlist');
     final data = response.data['data'] as List? ?? [];
@@ -48,7 +48,7 @@ class WatchlistRepository {
   }
 
   Future<List<WatchlistItem>> add(
-      String profileId, String tmdbId, String mediaType) async {
+      int profileId, String tmdbId, String mediaType) async {
     final response = await apiClient.dio.post(
       '/api/profiles/$profileId/watchlist',
       data: {'tmdb_id': tmdbId, 'media_type': mediaType},
@@ -60,7 +60,7 @@ class WatchlistRepository {
   }
 
   Future<List<WatchlistItem>> remove(
-      String profileId, String tmdbId, String mediaType) async {
+      int profileId, String tmdbId, String mediaType) async {
     final response = await apiClient.dio
         .delete('/api/profiles/$profileId/watchlist/$mediaType/$tmdbId');
     final data = response.data['data'] as List? ?? [];

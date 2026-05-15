@@ -1,4 +1,4 @@
-package com.rasjojo.jojoflix
+package com.example.jojoflix_app
 
 import android.content.BroadcastReceiver
 import android.content.Context

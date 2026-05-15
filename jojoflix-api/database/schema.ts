@@ -5,91 +5,133 @@
  */
 
 import { BaseModel, column } from '@adonisjs/lucid/orm'
+import { DateTime } from 'luxon'
 
-export class AccountSchema extends BaseModel {
-  static $columns = ['accessToken', 'accessTokenExpiresAt', 'accountId', 'createdAt', 'id', 'idToken', 'password', 'providerId', 'refreshToken', 'refreshTokenExpiresAt', 'scope', 'updatedAt', 'userId'] as const
-  $columns = AccountSchema.$columns
+export class AuthAccessTokenSchema extends BaseModel {
+  static $columns = ['abilities', 'createdAt', 'expiresAt', 'hash', 'id', 'lastUsedAt', 'name', 'tokenableId', 'type', 'updatedAt'] as const
+  $columns = AuthAccessTokenSchema.$columns
   @column()
-  declare accessToken: string | null
+  declare abilities: string
+  @column.dateTime({ autoCreate: true })
+  declare createdAt: DateTime | null
+  @column.dateTime()
+  declare expiresAt: DateTime | null
   @column()
-  declare accessTokenExpiresAt: number | null
-  @column()
-  declare accountId: string
-  @column()
-  declare createdAt: number
+  declare hash: string
   @column({ isPrimary: true })
-  declare id: string
+  declare id: number
+  @column.dateTime()
+  declare lastUsedAt: DateTime | null
   @column()
-  declare idToken: string | null
-  @column({ serializeAs: null })
-  declare password: string | null
+  declare name: string | null
   @column()
-  declare providerId: string
+  declare tokenableId: number
   @column()
-  declare refreshToken: string | null
-  @column()
-  declare refreshTokenExpiresAt: number | null
-  @column()
-  declare scope: string | null
-  @column()
-  declare updatedAt: number
-  @column()
-  declare userId: string
+  declare type: string
+  @column.dateTime({ autoCreate: true, autoUpdate: true })
+  declare updatedAt: DateTime | null
 }
 
-export class SessionSchema extends BaseModel {
-  static $columns = ['createdAt', 'expiresAt', 'id', 'ipAddress', 'token', 'updatedAt', 'userAgent', 'userId'] as const
-  $columns = SessionSchema.$columns
+export class MediaMarkerSchema extends BaseModel {
+  static $columns = ['createdAt', 'endTime', 'id', 'markerType', 'startTime', 'tmdbId', 'updatedAt'] as const
+  $columns = MediaMarkerSchema.$columns
+  @column.dateTime({ autoCreate: true })
+  declare createdAt: DateTime
   @column()
-  declare createdAt: number
-  @column()
-  declare expiresAt: number
+  declare endTime: number
   @column({ isPrimary: true })
-  declare id: string
+  declare id: number
   @column()
-  declare ipAddress: string | null
+  declare markerType: string
   @column()
-  declare token: string
+  declare startTime: number
   @column()
-  declare updatedAt: number
-  @column()
-  declare userAgent: string | null
-  @column()
-  declare userId: string
+  declare tmdbId: string
+  @column.dateTime({ autoCreate: true, autoUpdate: true })
+  declare updatedAt: DateTime | null
 }
 
-export class UserSchema extends BaseModel {
-  static $columns = ['createdAt', 'email', 'emailVerified', 'id', 'image', 'name', 'updatedAt'] as const
-  $columns = UserSchema.$columns
+export class ProfileInterestSchema extends BaseModel {
+  static $columns = ['affinityScore', 'createdAt', 'genreId', 'id', 'lastWatchedAt', 'profileId', 'updatedAt'] as const
+  $columns = ProfileInterestSchema.$columns
   @column()
-  declare createdAt: number
+  declare affinityScore: number
+  @column.dateTime({ autoCreate: true })
+  declare createdAt: DateTime
   @column()
-  declare email: string
-  @column()
-  declare emailVerified: number
+  declare genreId: number
   @column({ isPrimary: true })
-  declare id: string
+  declare id: number
+  @column.dateTime()
+  declare lastWatchedAt: DateTime | null
   @column()
-  declare image: string | null
+  declare profileId: number
+  @column.dateTime({ autoCreate: true, autoUpdate: true })
+  declare updatedAt: DateTime | null
+}
+
+export class ProfileSchema extends BaseModel {
+  static $columns = ['avatarUrl', 'createdAt', 'id', 'isKids', 'name', 'preferences', 'updatedAt', 'userId'] as const
+  $columns = ProfileSchema.$columns
+  @column()
+  declare avatarUrl: string | null
+  @column.dateTime({ autoCreate: true })
+  declare createdAt: DateTime
+  @column({ isPrimary: true })
+  declare id: number
+  @column()
+  declare isKids: boolean
   @column()
   declare name: string
   @column()
-  declare updatedAt: number
+  declare preferences: any
+  @column.dateTime({ autoCreate: true, autoUpdate: true })
+  declare updatedAt: DateTime | null
+  @column()
+  declare userId: number
 }
 
-export class VerificationSchema extends BaseModel {
-  static $columns = ['createdAt', 'expiresAt', 'id', 'identifier', 'updatedAt', 'value'] as const
-  $columns = VerificationSchema.$columns
+export class UserSchema extends BaseModel {
+  static $columns = ['createdAt', 'email', 'fullName', 'id', 'password', 'updatedAt'] as const
+  $columns = UserSchema.$columns
+  @column.dateTime({ autoCreate: true })
+  declare createdAt: DateTime
   @column()
-  declare createdAt: number | null
+  declare email: string
   @column()
-  declare expiresAt: number
+  declare fullName: string | null
   @column({ isPrimary: true })
-  declare id: string
-  @column()
-  declare identifier: string
-  @column()
-  declare updatedAt: number | null
-  @column()
-  declare value: string
+  declare id: number
+  @column({ serializeAs: null })
+  declare password: string
+  @column.dateTime({ autoCreate: true, autoUpdate: true })
+  declare updatedAt: DateTime | null
 }
+
+export class WatchHistorySchema extends BaseModel {
+  static $columns = ['createdAt', 'currentTime', 'episodeNum', 'id', 'isFinished', 'mediaType', 'profileId', 'seasonNum', 'tmdbId', 'totalDuration', 'updatedAt'] as const
+  $columns = WatchHistorySchema.$columns
+  @column.dateTime({ autoCreate: true })
+  declare createdAt: DateTime
+  @column()
+  declare currentTime: number
+  @column()
+  declare episodeNum: number | null
+  @column({ isPrimary: true })
+  declare id: number
+  @column()
+  declare isFinished: boolean
+  @column()
+  declare mediaType: string
+  @column()
+  declare profileId: number
+  @column()
+  declare seasonNum: number | null
+  @column()
+  declare tmdbId: string
+  @column()
+  declare totalDuration: number
+  @column.dateTime({ autoCreate: true, autoUpdate: true })
+  declare updatedAt: DateTime | null
+}
+// Schema

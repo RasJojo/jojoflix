@@ -205,20 +205,14 @@ export default class TorrentScoringService {
         this.fetchMediaFusion(tmdbId, mediaType, season, episode, 'full'),
         this.fetchDramaYo(tmdbId, mediaType, season, episode),
       ])
-      ;[mediaFusionRaw, dramaYoRaw] = await Promise.all([
-        this.filterDeadDirectUrls(mediaFusionRaw, 'mediafusion'),
-        this.filterDeadDirectUrls(dramaYoRaw, 'dramayo'),
-      ])
+      mediaFusionRaw = await this.filterDeadDirectUrls(mediaFusionRaw)
     } else {
       ;[torrentioRaw, mediaFusionRaw, dramaYoRaw] = await Promise.all([
         this.fetchTorrentio(tmdbId, mediaType, season, episode),
         this.fetchMediaFusion(tmdbId, mediaType, season, episode, 'fast'),
         this.fetchDramaYo(tmdbId, mediaType, season, episode),
       ])
-      ;[mediaFusionRaw, dramaYoRaw] = await Promise.all([
-        this.filterDeadDirectUrls(mediaFusionRaw, 'mediafusion'),
-        this.filterDeadDirectUrls(dramaYoRaw, 'dramayo'),
-      ])
+      mediaFusionRaw = await this.filterDeadDirectUrls(mediaFusionRaw)
     }
 
     const allCandidates = [
@@ -229,9 +223,15 @@ export default class TorrentScoringService {
       ...torrentioRaw.map((item) => this.scoreCandidate(item, 'torrentio', season, episode)),
     ].filter((item) => item.source.magnet.length > 0 || item.source.direct_url)
 
+    const beforeFilter = allCandidates.length
     const scored = allCandidates
+      .filter((item) => !this.isUnwantedDub(item.source))
       .sort((a, b) => this.compareCandidates(a, b, mediaType))
       .map((item) => item.source)
+    const filteredOut = beforeFilter - scored.length
+    if (filteredOut > 0) {
+      console.info(`[sources] filtered ${filteredOut} non-FR/EN dub sources out of ${beforeFilter}`)
+    }
 
     if (scored.length === 0) {
       throw new Error('NO_SOURCE_FOUND')
@@ -642,8 +642,8 @@ export default class TorrentScoringService {
             )
           }
           // Torrentio uses `title` for release details (language flags, size, etc.) — move to description.
-          // Exclure les pseudo-streams d'erreur que Torrentio retourne quand aucun torrent n'est disponible.
-          const NOT_READY_RE = /not\s+downloaded|not\s+ready|download\s+in\s+progress|filtered\s+due\s+to|no\s+streams?\s+found|stream\s+not\s+available|geoblocking|account.*invalid|account.*expired|license/i
+          // Exclure les streams "not ready" que Torrentio retourne pour les torrents en cours de téléchargement RD.
+          const NOT_READY_RE = /not\s+downloaded|not\s+ready|download\s+in\s+progress/i
           return streams
             .filter((s: any) => !NOT_READY_RE.test(s.name ?? '') && !NOT_READY_RE.test(s.title ?? ''))
             .map((s: any) => ({
@@ -811,61 +811,34 @@ export default class TorrentScoringService {
     mode: SourceProvidersMode = 'fast'
   ): string {
     if (mediaType === 'tv' && season && episode) {
-      return `sources:v12:${mode}:${mediaType}:${tmdbId}:s${season}e${episode}`
+      return `sources:v11:${mode}:${mediaType}:${tmdbId}:s${season}e${episode}`
     }
-    return `sources:v12:${mode}:${mediaType}:${tmdbId}`
+    return `sources:v11:${mode}:${mediaType}:${tmdbId}`
   }
 
-  private async probeUrl(
-    url: string,
-    provider: 'mediafusion' | 'dramayo' = 'mediafusion'
-  ): Promise<boolean> {
+  private async probeUrl(url: string): Promise<boolean> {
     try {
-      const useTorProxy = provider === 'dramayo' && this.torrentioProxyAgent
-      const request =
-        provider === 'dramayo'
-          ? got.get(url, {
-              retry: { limit: 0 },
-              timeout: { connect: 8_000, request: 15_000 },
-              followRedirect: true,
-              throwHttpErrors: false,
-              headers: {
-                'user-agent': 'Mozilla/5.0 (JOJOFLIX)',
-                'accept': '*/*',
-              },
-              ...(useTorProxy
-                ? { agent: { https: this.torrentioProxyAgent, http: this.torrentioProxyAgent } }
-                : {}),
-            })
-          : got.head(url, {
-              retry: { limit: 0 },
-              timeout: { connect: 2_000, request: 4_000 },
-              followRedirect: true,
-              throwHttpErrors: false,
-            })
-      const response = await request
-      // 4xx (sauf 429 rate-limit) → URL morte de façon permanente
-      if (response.statusCode >= 400 && response.statusCode < 500 && response.statusCode !== 429) {
-        return false
-      }
-      return response.statusCode >= 200 && response.statusCode < 500
+      const response = await got.head(url, {
+        retry: { limit: 0 },
+        timeout: { connect: 2_000, request: 4_000 },
+        followRedirect: true,
+        throwHttpErrors: false,
+      })
+      return response.statusCode >= 200 && response.statusCode < 400
     } catch {
-      // Timeout ou erreur réseau transiente → garder l'URL, le streaming controller décide au moment de la lecture
+      // Timeout ou erreur réseau : on garde l'URL, le streaming controller vérifie au moment de la lecture
       return true
     }
   }
 
-  private async filterDeadDirectUrls(
-    rawItems: any[],
-    provider: 'mediafusion' | 'dramayo'
-  ): Promise<any[]> {
+  private async filterDeadDirectUrls(rawItems: any[]): Promise<any[]> {
     const results = await Promise.all(
       rawItems.map(async (item) => {
         if (!item.url) return item
-        const alive = await this.probeUrl(item.url, provider)
+        const alive = await this.probeUrl(item.url)
         if (!alive) {
           console.warn(
-            `[sources:${provider}] dead direct_url filtered: ${(item.name ?? '').slice(0, 60)}`
+            `[sources:mediafusion] dead direct_url filtered: ${(item.name ?? '').slice(0, 60)}`
           )
           return item.infoHash ? { ...item, url: undefined } : null
         }
@@ -873,6 +846,34 @@ export default class TorrentScoringService {
       })
     )
     return results.filter(Boolean)
+  }
+
+  private isUnwantedDub(source: TorrentSource): boolean {
+    const text = source.raw_name
+    const normalizedText = this.normalizeLanguageText(text)
+
+    if (FRENCH_PATTERNS.some((p) => p.test(normalizedText))) return false
+    if (VOSTFR_PATTERNS.some((p) => p.test(normalizedText))) return false
+    if (ENGLISH_PATTERNS.some((p) => p.test(normalizedText))) return false
+    if (JAPANESE_PATTERNS.some((p) => p.test(normalizedText))) return false
+    if (KOREAN_PATTERNS.some((p) => p.test(normalizedText))) return false
+
+    return (
+      GERMAN_PATTERNS.some((p) => p.test(normalizedText)) ||
+      ITALIAN_PATTERNS.some((p) => p.test(normalizedText)) ||
+      SPANISH_PATTERNS.some((p) => p.test(normalizedText)) ||
+      PORTUGUESE_PATTERNS.some((p) => p.test(normalizedText)) ||
+      RUSSIAN_PATTERNS.some((p) => p.test(normalizedText)) ||
+      POLISH_PATTERNS.some((p) => p.test(normalizedText)) ||
+      TURKISH_PATTERNS.some((p) => p.test(normalizedText)) ||
+      CZECH_PATTERNS.some((p) => p.test(normalizedText)) ||
+      HUNGARIAN_PATTERNS.some((p) => p.test(normalizedText)) ||
+      UKRAINIAN_PATTERNS.some((p) => p.test(normalizedText)) ||
+      ARABIC_PATTERNS.some((p) => p.test(normalizedText)) ||
+      CHINESE_PATTERNS.some((p) => p.test(normalizedText)) ||
+      RUSSIAN_RELEASE_GROUP_PATTERNS.some((p) => p.test(text)) ||
+      CYRILLIC_PATTERN.test(text)
+    )
   }
 
   async invalidateSources(

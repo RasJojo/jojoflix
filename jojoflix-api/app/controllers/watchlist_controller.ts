@@ -1,7 +1,6 @@
 import type { HttpContext } from '@adonisjs/core/http'
-import ConvexRepository, { type ConvexProfile } from '#services/convex_repository'
+import Profile from '#models/profile'
 import TmdbService from '#services/tmdb_service'
-import { forgetHomeRowsCache } from '#services/home_cache_service'
 
 type WatchlistEntry = {
   tmdb_id: string
@@ -14,25 +13,14 @@ export default class WatchlistController {
     return meta.title ?? meta.name ?? ''
   }
 
-  async index({ betterAuthUser, params, response }: HttpContext) {
-    const user = betterAuthUser!
-    const repo = new ConvexRepository()
-    const profile = await this.resolveProfile(repo, user.id, params.id)
-    if (!profile) {
-      return response.notFound({ error: { code: 'NOT_FOUND', status: 404 } })
-    }
+  async index({ auth, params, response }: HttpContext) {
+    const profile = await this.resolveProfile(auth.getUserOrFail().id, params.id)
     const items = await this.serializeWatchlist(profile)
     return response.ok({ data: items })
   }
 
-  async store({ betterAuthUser, params, request, response }: HttpContext) {
-    const user = betterAuthUser!
-    const repo = new ConvexRepository()
-    const profile = await this.resolveProfile(repo, user.id, params.id)
-    if (!profile) {
-      return response.notFound({ error: { code: 'NOT_FOUND', status: 404 } })
-    }
-
+  async store({ auth, params, request, response }: HttpContext) {
+    const profile = await this.resolveProfile(auth.getUserOrFail().id, params.id)
     const tmdbId = String(request.input('tmdb_id') ?? '').trim()
     const mediaType = request.input('media_type')
 
@@ -56,64 +44,47 @@ export default class WatchlistController {
       added_at: new Date().toISOString(),
     })
 
-    const updated = await repo.updateProfile(profile._id, {
-      preferences: {
-        ...(profile.preferences ?? {}),
-        watchlist: deduped.slice(0, 200),
-      },
-    })
-    await forgetHomeRowsCache(profile._id)
+    profile.preferences = {
+      ...(profile.preferences ?? {}),
+      watchlist: deduped.slice(0, 200),
+    }
+    await profile.save()
 
-    return response.ok({ data: await this.serializeWatchlist(updated) })
+    return response.ok({ data: await this.serializeWatchlist(profile) })
   }
 
-  async destroy({ betterAuthUser, params, response }: HttpContext) {
-    const user = betterAuthUser!
-    const repo = new ConvexRepository()
-    const profile = await this.resolveProfile(repo, user.id, params.id)
-    if (!profile) {
-      return response.notFound({ error: { code: 'NOT_FOUND', status: 404 } })
-    }
-
+  async destroy({ auth, params, response }: HttpContext) {
+    const profile = await this.resolveProfile(auth.getUserOrFail().id, params.id)
     const tmdbId = String(params.tmdbId ?? '').trim()
-    const mediaType =
-      params.mediaType === 'tv' ? 'tv' : params.mediaType === 'movie' ? 'movie' : null
+    const mediaType = params.mediaType === 'tv' ? 'tv' : params.mediaType === 'movie' ? 'movie' : null
 
     if (!tmdbId || !mediaType) {
       return response.badRequest({
-        error: { code: 'INVALID_WATCHLIST_TARGET', message: 'Cible invalide', status: 400 },
+        error: {
+          code: 'INVALID_WATCHLIST_TARGET',
+          message: 'Cible de watchlist invalide',
+          status: 400,
+        },
       })
     }
 
     const filtered = this.readWatchlist(profile).filter(
       (entry) => !(entry.tmdb_id === tmdbId && entry.media_type === mediaType)
     )
+    profile.preferences = {
+      ...(profile.preferences ?? {}),
+      watchlist: filtered,
+    }
+    await profile.save()
 
-    await repo.updateProfile(profile._id, {
-      preferences: {
-        ...(profile.preferences ?? {}),
-        watchlist: filtered,
-      },
-    })
-    await forgetHomeRowsCache(profile._id)
-
-    return response.ok({
-      data: await this.serializeWatchlist({
-        ...profile,
-        preferences: { ...profile.preferences, watchlist: filtered },
-      }),
-    })
+    return response.ok({ data: await this.serializeWatchlist(profile) })
   }
 
-  private async resolveProfile(
-    repo: ConvexRepository,
-    userId: string,
-    profileId: string
-  ): Promise<ConvexProfile | null> {
-    return repo.getProfileOfUser(profileId, userId)
+  private async resolveProfile(userId: number, rawProfileId: string | number) {
+    return Profile.query().where('id', rawProfileId).where('user_id', userId).firstOrFail()
   }
 
-  private readWatchlist(profile: ConvexProfile): WatchlistEntry[] {
+  private readWatchlist(profile: Profile): WatchlistEntry[] {
     const watchlist = profile.preferences?.watchlist
     if (!Array.isArray(watchlist)) return []
 
@@ -126,7 +97,7 @@ export default class WatchlistController {
       .filter((entry) => entry.tmdb_id.length > 0)
   }
 
-  private async serializeWatchlist(profile: ConvexProfile) {
+  private async serializeWatchlist(profile: Profile) {
     const tmdb = new TmdbService()
     const entries = this.readWatchlist(profile)
 

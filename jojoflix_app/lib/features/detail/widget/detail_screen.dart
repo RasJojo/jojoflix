@@ -10,7 +10,6 @@ import '../../home/widget/home_screen.dart';
 import '../../profiles/repository/watchlist_repository.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/widget/jojoflix_loader.dart';
-import '../../download/download_manager.dart';
 
 part 'detail_screen.g.dart';
 
@@ -58,7 +57,7 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
 
   Future<void> _loadWatchlist() async {
     final profileId = _activeProfileId;
-    if (profileId == null) {
+    if (profileId == null || profileId <= 0) {
       if (!mounted) return;
       setState(() {
         _watchlistKeys = const {};
@@ -88,10 +87,9 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
     }
   }
 
-  String? get _activeProfileId {
+  int? get _activeProfileId {
     final prefs = ref.read(sharedPreferencesProvider);
-    final id = prefs.getString('active_profile_id');
-    return (id != null && id.isNotEmpty) ? id : null;
+    return int.tryParse(prefs.getString('active_profile_id') ?? '');
   }
 
   bool get _isInWatchlist =>
@@ -99,7 +97,7 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
 
   Future<void> _toggleWatchlist() async {
     final profileId = _activeProfileId;
-    if (profileId == null || _isWatchlistUpdating) return;
+    if (profileId == null || profileId <= 0 || _isWatchlistUpdating) return;
 
     setState(() => _isWatchlistUpdating = true);
     try {
@@ -154,7 +152,7 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
   }
 }
 
-class _DetailContent extends ConsumerWidget {
+class _DetailContent extends StatelessWidget {
   final MediaDetail detail;
   final WatchProgress? progress;
   final int selectedSeason;
@@ -199,7 +197,7 @@ class _DetailContent extends ConsumerWidget {
   bool get _hasProgress => (progress?.progress ?? 0) > 0;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     return CustomScrollView(
       slivers: [
         // Backdrop + back button
@@ -304,7 +302,8 @@ class _DetailContent extends ConsumerWidget {
                         ),
                         child: Text(genre,
                             style: const TextStyle(
-                                color: AppColors.textSecondary, fontSize: 11)),
+                                color: AppColors.textSecondary,
+                                fontSize: 11)),
                       ),
                   ],
                 ),
@@ -372,15 +371,6 @@ class _DetailContent extends ConsumerWidget {
                       label: Text(isInWatchlist ? 'Dans ma liste' : 'Ma liste'),
                       onPressed: isWatchlistBusy ? null : onToggleWatchlist,
                     ),
-                    if (detail.mediaType == 'movie') ...[
-                      const SizedBox(width: AppSpacing.sm),
-                      _DownloadIconButton(
-                        tmdbId: detail.tmdbId,
-                        mediaType: detail.mediaType,
-                        title: detail.title,
-                        artworkUrl: detail.backdropUrl,
-                      ),
-                    ],
                   ],
                 ),
                 if (detail.trailerKey != null) ...[
@@ -453,13 +443,6 @@ class _DetailContent extends ConsumerWidget {
                     selectedIndex: selectedSeason,
                     onChanged: onSeasonChanged,
                   ),
-                  _SeasonDownloadButton(
-                    tmdbId: detail.tmdbId,
-                    title: detail.title,
-                    season: detail.seasons[selectedSeason],
-                    artworkUrl: detail.backdropUrl,
-                  ),
-                  const SizedBox(height: AppSpacing.md),
                 ],
               ],
             ),
@@ -504,89 +487,6 @@ class _DetailContent extends ConsumerWidget {
           'S${detail.seasons.first.seasonNumber} E${extra['episode']}';
     }
     context.push('/player/${detail.mediaType}/${detail.tmdbId}', extra: extra);
-  }
-}
-
-class _SeasonDownloadButton extends ConsumerWidget {
-  final String tmdbId;
-  final String title;
-  final Season season;
-  final String? artworkUrl;
-
-  const _SeasonDownloadButton({
-    required this.tmdbId,
-    required this.title,
-    required this.season,
-    this.artworkUrl,
-  });
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final state = ref.watch(downloadManagerProvider);
-    final episodeIds = season.episodes
-        .map((episode) => downloadItemId(
-              tmdbId: tmdbId,
-              mediaType: 'tv',
-              season: season.seasonNumber,
-              episode: episode.episodeNumber,
-            ))
-        .toSet();
-    final activeCount =
-        episodeIds.where((id) => state.activeTasks.containsKey(id)).length;
-    final completedCount = state.completedDownloads
-        .where((item) => episodeIds.contains(item.id))
-        .length;
-    final allDone =
-        episodeIds.isNotEmpty && completedCount >= episodeIds.length;
-    final isBusy = activeCount > 0;
-
-    return SizedBox(
-      width: double.infinity,
-      child: OutlinedButton.icon(
-        style: OutlinedButton.styleFrom(
-          foregroundColor: AppColors.textPrimary,
-          side: const BorderSide(color: AppColors.surfaceVariant),
-          padding: const EdgeInsets.symmetric(
-            horizontal: AppSpacing.md,
-            vertical: AppSpacing.md,
-          ),
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-        ),
-        icon: isBusy
-            ? const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            : Icon(
-                allDone ? Icons.download_done_rounded : Icons.download_rounded),
-        label: Text(
-          allDone
-              ? 'Saison téléchargée'
-              : isBusy
-                  ? '$completedCount/${episodeIds.length} épisodes'
-                  : 'Télécharger la saison',
-        ),
-        onPressed: allDone || isBusy
-            ? null
-            : () =>
-                ref.read(downloadManagerProvider.notifier).startSeasonDownload(
-                      tmdbId: tmdbId,
-                      title: title,
-                      artworkUrl: artworkUrl,
-                      episodes: season.episodes
-                          .map((episode) => SeasonEpisodeDownloadSpec(
-                                season: season.seasonNumber,
-                                episode: episode.episodeNumber,
-                                episodeLabel:
-                                    'S${season.seasonNumber} E${episode.episodeNumber} • ${episode.name}',
-                                artworkUrl: episode.stillUrl ?? artworkUrl,
-                              ))
-                          .toList(growable: false),
-                    ),
-      ),
-    );
   }
 }
 
@@ -701,11 +601,13 @@ class _SeasonSelector extends StatelessWidget {
                     child: Text(
                       seasons[i].name,
                       style: TextStyle(
-                        color:
-                            selected ? Colors.white : AppColors.textSecondary,
+                        color: selected
+                            ? Colors.white
+                            : AppColors.textSecondary,
                         fontSize: 13,
-                        fontWeight:
-                            selected ? FontWeight.w600 : FontWeight.w400,
+                        fontWeight: selected
+                            ? FontWeight.w600
+                            : FontWeight.w400,
                       ),
                     ),
                   ),
@@ -753,7 +655,7 @@ class _EpisodeList extends StatelessWidget {
   }
 }
 
-class _EpisodeTile extends ConsumerWidget {
+class _EpisodeTile extends StatelessWidget {
   final Episode episode;
   final String tmdbId;
   final int seasonNumber;
@@ -769,7 +671,7 @@ class _EpisodeTile extends ConsumerWidget {
   });
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     return InkWell(
       onTap: () => context.push(
         '/player/tv/$tmdbId',
@@ -863,93 +765,9 @@ class _EpisodeTile extends ConsumerWidget {
                 ],
               ),
             ),
-
-            // Download
-            _DownloadIconButton(
-              tmdbId: tmdbId,
-              mediaType: 'tv',
-              title: seriesTitle,
-              season: seasonNumber,
-              episode: episode.episodeNumber,
-              episodeLabel: 'S$seasonNumber E${episode.episodeNumber}',
-              artworkUrl: artworkUrl ?? episode.stillUrl,
-            ),
           ],
         ),
       ),
-    );
-  }
-}
-
-class _DownloadIconButton extends ConsumerWidget {
-  final String tmdbId;
-  final String mediaType;
-  final String title;
-  final int? season;
-  final int? episode;
-  final String? episodeLabel;
-  final String? artworkUrl;
-
-  const _DownloadIconButton({
-    required this.tmdbId,
-    required this.mediaType,
-    required this.title,
-    this.season,
-    this.episode,
-    this.episodeLabel,
-    this.artworkUrl,
-  });
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final downloadState = ref.watch(downloadManagerProvider);
-    final itemId = downloadItemId(
-      tmdbId: tmdbId,
-      mediaType: mediaType,
-      season: season,
-      episode: episode,
-    );
-    final task = downloadState.taskFor(itemId);
-    final completed = downloadState.completedFor(itemId);
-
-    if (completed != null) {
-      return const Padding(
-        padding: EdgeInsets.all(8),
-        child: Icon(Icons.download_done_rounded,
-            color: AppColors.primary, size: 22),
-      );
-    }
-
-    if (task != null) {
-      return Padding(
-        padding: const EdgeInsets.all(8),
-        child: SizedBox(
-          width: 22,
-          height: 22,
-          child: CircularProgressIndicator(
-            value: task.status == DownloadTaskStatus.downloading
-                ? task.progress
-                : null,
-            strokeWidth: 2,
-            color: AppColors.primary,
-          ),
-        ),
-      );
-    }
-
-    return IconButton(
-      icon: const Icon(Icons.download_outlined),
-      color: AppColors.textSecondary,
-      iconSize: 22,
-      onPressed: () => ref.read(downloadManagerProvider.notifier).startDownload(
-            tmdbId: tmdbId,
-            mediaType: mediaType,
-            title: title,
-            season: season,
-            episode: episode,
-            episodeLabel: episodeLabel,
-            artworkUrl: artworkUrl,
-          ),
     );
   }
 }

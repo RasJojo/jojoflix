@@ -32,9 +32,6 @@ export default class RealDebridService {
   private readonly cache: CacheWrapper
 
   constructor() {
-    if (!RD_BASE_URL.startsWith('https://')) {
-      throw new Error('RD_BASE_URL must use HTTPS')
-    }
     this.apiKey = env.get('RD_API_KEY').release()
     this.cache = new CacheWrapper()
   }
@@ -61,37 +58,7 @@ export default class RealDebridService {
     const unavailableKey = `rd:unavailable:${crypto.createHash('md5').update(cacheSeed).digest('hex')}`
 
     const cached = await this.cache.get<string>(cacheKey)
-    if (cached) {
-      // Vérifier rapidement que le lien n'est pas expiré (HEAD < 3s)
-      // avant de le renvoyer — RD links expirent souvent avant le TTL de 30min.
-      try {
-        const probe = await got.head(cached, {
-          followRedirect: true,
-          retry: { limit: 0 },
-          timeout: { connect: 2_000, request: 3_000 },
-          throwHttpErrors: false,
-        })
-        if (probe.statusCode === 404 || probe.statusCode === 410 || probe.statusCode === 403) {
-          console.info(`[rd] cached link expired (${probe.statusCode}), re-resolving`)
-          await this.cache.forget(cacheKey)
-          // Fall through to fresh resolution below
-        } else {
-          return cached
-        }
-      } catch (headErr) {
-        // Distinguer erreur réseau pure (pas de réponse) des erreurs HTTP avec statusCode.
-        // Si got a un statusCode dans l'erreur, c'est une réponse HTTP : invalider le cache.
-        const httpStatus = (headErr as { response?: { statusCode?: number } })?.response?.statusCode
-        if (httpStatus === 401 || httpStatus === 403 || httpStatus === 404) {
-          console.info(`[rd] cached link expired via error (${httpStatus}), re-resolving`)
-          await this.cache.forget(cacheKey)
-          // Fall through to fresh resolution below
-        } else {
-          // Erreur réseau pure → on renvoie quand même le lien caché, le streaming controller gérera
-          return cached
-        }
-      }
-    }
+    if (cached) return cached
     const blocked = await this.cache.get<boolean>(blockedKey)
     if (blocked) {
       throw new Error('RD_ERROR: Magnet blocked (cached 451)')
@@ -142,8 +109,8 @@ export default class RealDebridService {
         .post(`${RD_BASE_URL}/torrents/addMagnet`, {
           headers: { Authorization: `Bearer ${this.apiKey}` },
           form: { magnet },
-          retry: { limit: 2 },
-          timeout: { connect: 3_000, request: 10_000 },
+          retry: { limit: 0 },
+          timeout: { connect: 3_000, request: 6_000 },
         })
         .json<{ id: string }>()
 
@@ -158,24 +125,13 @@ export default class RealDebridService {
     options: UnrestrictOptions = {},
     maxAttempts = 15
   ): Promise<string> {
-    // Sélectionner tous les fichiers du torrent — retry 2x on transient network errors
-    // to avoid leaving the torrent un-selected (orphaned) in the RD account.
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        await got.post(`${RD_BASE_URL}/torrents/selectFiles/${torrentId}`, {
-          headers: { Authorization: `Bearer ${this.apiKey}` },
-          form: { files: 'all' },
-          retry: { limit: 0 },
-          timeout: { connect: 3_000, request: 10_000 },
-        })
-        break
-      } catch (err) {
-        const status = (err as { response?: { statusCode?: number } })?.response?.statusCode
-        if (status === 401 || status === 403) throw err
-        if (attempt === 2) throw err
-        await new Promise((resolve) => setTimeout(resolve, 1_000))
-      }
-    }
+    // Sélectionner tous les fichiers du torrent
+    await got.post(`${RD_BASE_URL}/torrents/selectFiles/${torrentId}`, {
+      headers: { Authorization: `Bearer ${this.apiKey}` },
+      form: { files: 'all' },
+      retry: { limit: 0 },
+      timeout: { connect: 3_000, request: 6_000 },
+    })
 
     // Attendre que le torrent soit prêt (max 30s, poll toutes les 2s)
     const info = await this.pollTorrentReady(torrentId, maxAttempts)
@@ -192,7 +148,7 @@ export default class RealDebridService {
         headers: { Authorization: `Bearer ${this.apiKey}` },
         form: { link: mainLink },
         retry: { limit: 0 },
-        timeout: { connect: 3_000, request: 10_000 },
+        timeout: { connect: 3_000, request: 6_000 },
       })
       .json<{ download: string }>()
 
@@ -201,33 +157,20 @@ export default class RealDebridService {
 
   private async pollTorrentReady(torrentId: string, maxAttempts: number): Promise<RdTorrentInfo> {
     for (let i = 0; i < maxAttempts; i++) {
-      try {
-        const info = await got
-          .get(`${RD_BASE_URL}/torrents/info/${torrentId}`, {
-            headers: { Authorization: `Bearer ${this.apiKey}` },
-            retry: { limit: 0 },
-            timeout: { connect: 3_000, request: 8_000 },
-          })
-          .json<RdTorrentInfo>()
+      const info = await got
+        .get(`${RD_BASE_URL}/torrents/info/${torrentId}`, {
+          headers: { Authorization: `Bearer ${this.apiKey}` },
+          retry: { limit: 0 },
+          timeout: { connect: 3_000, request: 5_000 },
+        })
+        .json<RdTorrentInfo>()
 
-        if (info.status === 'downloaded') {
-          return info
-        }
+      if (info.status === 'downloaded') {
+        return info
+      }
 
-        if (['error', 'magnet_error', 'virus', 'dead'].includes(info.status)) {
-          throw new Error(`RD_ERROR: Torrent status = ${info.status}`)
-        }
-      } catch (err) {
-        // Auth errors are permanent — propagate immediately.
-        const status = (err as { response?: { statusCode?: number } })?.response?.statusCode
-        if (status === 401 || status === 403) {
-          throw err
-        }
-        // Terminal RD status errors must also propagate immediately.
-        if (err instanceof Error && err.message.startsWith('RD_ERROR:')) {
-          throw err
-        }
-        // Transient network errors (ECONNRESET, 502, 503, etc.) — continue polling.
+      if (['error', 'magnet_error', 'virus', 'dead'].includes(info.status)) {
+        throw new Error(`RD_ERROR: Torrent status = ${info.status}`)
       }
 
       if (i < maxAttempts - 1) {

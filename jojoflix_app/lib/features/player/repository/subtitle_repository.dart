@@ -11,7 +11,7 @@ SubtitleRepository subtitleRepository(Ref ref) {
 }
 
 class SubtitleEntry {
-  final String fileId;
+  final int fileId;
   final String language;
   final String releaseName;
   final bool hearingImpaired;
@@ -25,7 +25,7 @@ class SubtitleEntry {
 
   factory SubtitleEntry.fromJson(Map<String, dynamic> json) {
     return SubtitleEntry(
-      fileId: json['file_id'].toString(),
+      fileId: json['file_id'] as int,
       language: json['language'] as String,
       releaseName: json['release_name'] as String? ?? '',
       hearingImpaired: json['hearing_impaired'] as bool? ?? false,
@@ -125,12 +125,10 @@ class SubtitleRepository {
     String tmdbId, {
     int? season,
     int? episode,
-    String? streamId,
   }) async {
     final params = <String, dynamic>{};
     if (season != null) params['season'] = season;
     if (episode != null) params['episode'] = episode;
-    if (streamId != null && streamId.isNotEmpty) params['stream_id'] = streamId;
 
     final response = await apiClient.dio.get(
       '/api/subtitles/list/$tmdbId',
@@ -145,24 +143,18 @@ class SubtitleRepository {
 
   /// Retourne l'URL proxy /api/subtitles/vtt/:id à passer au player.
   Future<String> downloadSubtitle(
-    String fileId,
+    int fileId,
     String language, {
-    String? streamId,
-    Duration timeout = const Duration(seconds: 45),
+    Duration timeout = const Duration(seconds: 6),
   }) async {
-    final data = <String, dynamic>{
-      'file_id': fileId,
-      'language': language,
-    };
-    if (streamId != null && streamId.isNotEmpty) {
-      data['stream_id'] = streamId;
-    }
-
     final response = await apiClient.dio.post(
       '/api/subtitles/download',
-      data: data,
+      data: {
+        'file_id': fileId,
+        'language': language,
+      },
       options: Options(
-        sendTimeout: const Duration(seconds: 10),
+        sendTimeout: timeout,
         receiveTimeout: timeout,
       ),
     );
