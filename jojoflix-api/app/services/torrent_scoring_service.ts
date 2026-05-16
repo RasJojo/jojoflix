@@ -642,8 +642,8 @@ export default class TorrentScoringService {
             )
           }
           // Torrentio uses `title` for release details (language flags, size, etc.) — move to description.
-          // Exclure les streams "not ready" que Torrentio retourne pour les torrents en cours de téléchargement RD.
-          const NOT_READY_RE = /not\s+downloaded|not\s+ready|download\s+in\s+progress/i
+          // Exclure les pseudo-streams d'erreur que Torrentio retourne quand aucun torrent n'est disponible.
+          const NOT_READY_RE = /not\s+downloaded|not\s+ready|download\s+in\s+progress|filtered\s+due\s+to|no\s+streams?\s+found|stream\s+not\s+available/i
           return streams
             .filter((s: any) => !NOT_READY_RE.test(s.name ?? '') && !NOT_READY_RE.test(s.title ?? ''))
             .map((s: any) => ({
@@ -811,9 +811,9 @@ export default class TorrentScoringService {
     mode: SourceProvidersMode = 'fast'
   ): string {
     if (mediaType === 'tv' && season && episode) {
-      return `sources:v11:${mode}:${mediaType}:${tmdbId}:s${season}e${episode}`
+      return `sources:v12:${mode}:${mediaType}:${tmdbId}:s${season}e${episode}`
     }
-    return `sources:v11:${mode}:${mediaType}:${tmdbId}`
+    return `sources:v12:${mode}:${mediaType}:${tmdbId}`
   }
 
   private async probeUrl(url: string): Promise<boolean> {
