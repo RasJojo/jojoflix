@@ -388,49 +388,35 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
     final original = _externalSubtitleOriginalVtt;
     if (original == null || original.trim().isEmpty) return;
 
-    final shifted = _shiftAndScaleWebVtt(
-      original,
-      delayMs: _subtitleDelayMs,
-      scale: _subtitleScale,
-    );
-
-    // Supprimer les data tracks injectés précédemment avant d'en ajouter un nouveau.
-    // Sans ce nettoyage, chaque ajustement de sync accumule des tracks dans mpv,
-    // ce qui peut faire activer la mauvaise piste (bug sync) et polluer la liste UI.
+    // On injecte toujours le VTT avec ses timestamps d'origine (pas de décalage
+    // dans le contenu). Le décalage et la vitesse sont appliqués via les
+    // propriétés mpv sub-delay / sub-speed, plus simples et plus fiables
+    // que la ré-injection du VTT à chaque ajustement.
     await _removeInjectedSubtitleTracks();
     await _player.setSubtitleTrack(SubtitleTrack.no());
     await _player.setSubtitleTrack(
       SubtitleTrack.data(
-        shifted,
+        original,
         title: _externalSubtitleLabel,
         language: _externalSubtitleLanguage,
       ),
     );
+    await _applyNativeSubtitleDelay();
     _refreshTrackRefs();
   }
 
-  /// Supprime via mpv toutes les pistes sous-titres injectées dynamiquement
-  /// (data ou uri) pour éviter leur accumulation entre deux ajustements.
+  /// Supprime via mpv toutes les pistes sous-titres ajoutées dynamiquement
+  /// (sub-add / data tracks) pour éviter leur accumulation entre ajustements.
   /// Best-effort : silencieux si le backend mpv n'est pas disponible.
   Future<void> _removeInjectedSubtitleTracks() async {
-    final injected = _player.state.tracks.subtitle
-        .where((t) => t.data || t.uri)
-        .toList(growable: false);
-    if (injected.isEmpty) return;
-
     final platform = _player.platform;
     if (platform == null) return;
-
-    for (final track in injected) {
-      final idStr = track.id.toString();
-      if (idStr.isEmpty || idStr == 'no' || idStr == 'auto') {
-        continue;
-      }
-      try {
-        await (platform as dynamic).command(['sub-remove', idStr]);
-      } catch (_) {
-        // sub-remove indisponible sur cette plateforme — on continue.
-      }
+    try {
+      // sub-remove sans argument supprime toutes les pistes externes (sub-add).
+      // Les pistes intégrées au container ne sont pas affectées.
+      await (platform as dynamic).command(['sub-remove']);
+    } catch (_) {
+      // sub-remove indisponible sur cette plateforme — on continue.
     }
   }
 
@@ -454,10 +440,10 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
   }
 
   Future<void> _applySubtitleTimingToPlayer() async {
-    if (_externalSubtitleOriginalVtt != null) {
-      await _applyExternalSubtitleTrack();
-      return;
-    }
+    // Le décalage est TOUJOURS appliqué via sub-delay/sub-speed mpv,
+    // qu'il s'agisse de pistes embarquées ou externes (OpenSubtitles).
+    // Cela évite de ré-injecter le VTT à chaque ajustement et fonctionne
+    // sur toutes les plateformes supportant libmpv.
     await _applyNativeSubtitleDelay();
   }
 
