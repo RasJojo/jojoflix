@@ -420,6 +420,15 @@ export default class StreamingController {
     })
   }
 
+  private isDramayoCdnUrl(url: string): boolean {
+    try {
+      const { hostname } = new URL(url)
+      return hostname.includes('cdnvideo') || hostname.includes('dramayo')
+    } catch {
+      return false
+    }
+  }
+
   private isSourceAvailabilityError(error: unknown): boolean {
     if (!(error instanceof Error)) return false
     const message = error.message.toUpperCase()
@@ -464,12 +473,19 @@ export default class StreamingController {
 
     // 4. Stream proxy (Range + backpressure) : on ne renvoie jamais l'URL RD au client.
     const rangeHeader = request.header('range')
+    const proxyHeaders: Record<string, string> = {}
+    if (rangeHeader) proxyHeaders['Range'] = rangeHeader
+    // DramaYo CDN requiert un Referer pour servir les manifests HLS (sinon 403)
+    if (this.isDramayoCdnUrl(directUrl)) {
+      proxyHeaders['Referer'] = 'https://www.dramayo.com/'
+      proxyHeaders['Origin'] = 'https://www.dramayo.com'
+    }
     const upstream = got.stream(directUrl, {
       throwHttpErrors: false,
       decompress: false,
       retry: { limit: 0 },
       timeout: { connect: 15_000 },
-      headers: rangeHeader ? { Range: rangeHeader } : undefined,
+      headers: Object.keys(proxyHeaders).length > 0 ? proxyHeaders : undefined,
     })
 
     response.response.once('close', () => {
