@@ -67,18 +67,7 @@ export default class HomeController {
             progress: h.totalDuration > 0 ? h.currentTime / h.totalDuration : 0,
           }
         } catch {
-          return {
-            tmdb_id: h.tmdbId,
-            media_type: h.mediaType,
-            title: h.tmdbId,
-            poster_url: null,
-            backdrop_url: null,
-            season_num: h.seasonNum,
-            episode_num: h.episodeNum,
-            current_time: h.currentTime,
-            total_duration: h.totalDuration,
-            progress: h.totalDuration > 0 ? h.currentTime / h.totalDuration : 0,
-          }
+          return null
         }
       })
     )
@@ -112,10 +101,11 @@ export default class HomeController {
     )
 
     const watchlistItems = enrichedWatchlist.filter((item): item is NonNullable<typeof item> => item !== null)
+    const continueItems = enrichedContinue.filter((item): item is NonNullable<typeof item> => item !== null)
 
     const allRows = [
-      ...(enrichedContinue.length > 0
-        ? [{ type: 'continue_watching', title: 'Continuer de regarder', items: enrichedContinue }]
+      ...(continueItems.length > 0
+        ? [{ type: 'continue_watching', title: 'Continuer de regarder', items: continueItems }]
         : []),
       ...(watchlistItems.length > 0
         ? [
