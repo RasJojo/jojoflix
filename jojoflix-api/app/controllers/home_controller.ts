@@ -131,4 +131,65 @@ export default class HomeController {
 
     return response.ok({ data: { rows: allRows } })
   }
+
+  async browse({ auth, params, response }: HttpContext) {
+    auth.getUserOrFail()
+
+    const mediaType = params.mediaType as 'movie' | 'tv'
+    if (mediaType !== 'movie' && mediaType !== 'tv') {
+      return response.badRequest({ message: 'mediaType must be movie or tv' })
+    }
+
+    const tmdb = new TmdbService()
+
+    const genres =
+      mediaType === 'movie'
+        ? [
+            { id: 28, label: 'Action' },
+            { id: 35, label: 'Comédie' },
+            { id: 18, label: 'Drame' },
+            { id: 53, label: 'Thriller' },
+            { id: 878, label: 'Science-Fiction' },
+            { id: 27, label: 'Horreur' },
+          ]
+        : [
+            { id: 10759, label: 'Action & Aventure' },
+            { id: 35, label: 'Comédie' },
+            { id: 18, label: 'Drame' },
+            { id: 10765, label: 'Science-Fiction & Fantastique' },
+            { id: 16, label: 'Animation' },
+            { id: 9648, label: 'Mystère' },
+          ]
+
+    const [trending, ...genreResults] = await Promise.all([
+      tmdb.getTrending(mediaType, 'week'),
+      ...genres.map((g) => tmdb.getTrendingByGenre(g.id, mediaType)),
+    ])
+
+    const normalize = (item: any) => ({
+      tmdb_id: String(item.tmdb_id),
+      media_type: mediaType,
+      title: (item.title ?? item.name ?? '') as string,
+      poster_url: item.poster_url ?? null,
+      backdrop_url: item.backdrop_url ?? null,
+      current_time: null,
+      total_duration: null,
+      progress: null,
+    })
+
+    const rows = [
+      {
+        type: 'trending',
+        title: mediaType === 'movie' ? 'Films tendance' : 'Séries tendance',
+        items: trending.map(normalize),
+      },
+      ...genres.map((g, i) => ({
+        type: 'genre',
+        title: g.label,
+        items: genreResults[i].map(normalize),
+      })),
+    ]
+
+    return response.ok({ data: { rows } })
+  }
 }

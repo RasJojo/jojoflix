@@ -1,0 +1,27 @@
+{
+  email admin@jojoserv.com
+}
+
+rasjojo.jojoserv.com, rasjojo.jojoserv.fr {
+  reverse_proxy portfolio_api:3333
+}
+
+minio.jojoserv.com {
+  reverse_proxy minio-minio-1:9000
+}
+
+console.minio.jojoserv.com {
+  reverse_proxy minio-minio-1:9001
+}
+
+lifeos.jojoserv.com {
+  reverse_proxy lifeos-frontend:3000
+}
+
+jojoflixapi.jojoserv.com {
+  reverse_proxy jojoflix-api:3333
+}
+
+jojomusicapi.jojoserv.com {
+  reverse_proxy jojomusic-core:8000
+}

@@ -1,8 +1,8 @@
 import CacheWrapper, { CACHE_TTL } from '#services/cache_wrapper'
 import got from 'got'
 
-const DEFAULT_MANIFEST_URL =
-  'https://subsense.nepiraw.com/txjvs4rj-IuOxgfqym-UNBQtf5gY7Kibu2I2BS-aopNAN0nYndCMm7uTa9nxqtfid9b_tp2zu2iYgqXmwReTLDINKT905aPlkWNqEELU-ggBDfr_6HYae_6SP8hfR0IOKw5gsPGtNisc0nKeaxfC1apWIK8b8vKIV320boJ1pr5a4f3iw1Wk8XZh4U2ySvoVf2KKu2PuTEivKqhdzaUhLVg/manifest.json'
+const OSUB_BASE = 'https://api.opensubtitles.com/api/v1'
+const OSUB_USER_AGENT = 'JojoFlix v1.0'
 
 export interface SubtitleEntry {
   file_id: number
@@ -16,100 +16,114 @@ export interface SubtitleResult {
   language: string
 }
 
-interface CachedSubtitleEntry extends SubtitleEntry {
-  _url: string
+interface OSubFile {
+  file_id: number
+  file_name?: string
 }
 
-interface StremioSubtitleItem {
-  id?: string | number
-  sub_id?: string | number
-  lang?: string
-  lang_code?: string
-  label?: string
-  title?: string
-  name?: string
-  url?: string
+interface OSubEntry {
+  attributes?: {
+    language?: string
+    release?: string
+    hearing_impaired?: boolean
+    files?: OSubFile[]
+    feature_details?: { movie_name?: string }
+  }
 }
 
 export default class SubtitlesService {
   private readonly cache: CacheWrapper
-  private readonly addonBaseUrl: string
+  private readonly apiKey: string
 
   constructor() {
     this.cache = new CacheWrapper()
-    this.addonBaseUrl = this.resolveAddonBaseUrl(
-      process.env.SUBTITLES_ADDON_MANIFEST_URL ?? DEFAULT_MANIFEST_URL
-    )
+    this.apiKey = process.env.OPENSUBS_API_KEY ?? ''
   }
 
   async listSubtitles(imdbId: string, season?: number, episode?: number): Promise<SubtitleEntry[]> {
+    const numericImdb = imdbId.replace(/^tt/i, '')
     const { mediaType, mediaId } = this.buildStremioMediaRef(imdbId, season, episode)
-    const cacheKey = `subtitles:list:${mediaType}:${mediaId}`
+    const cacheKey = `subtitles:v2:list:${mediaType}:${mediaId}`
 
-    // Cache hit — re-hydrater les URL keys seulement si le format est valide (contient _url)
-    const cached = await this.cache.get<CachedSubtitleEntry[]>(cacheKey)
-    if (cached && Array.isArray(cached) && cached.length > 0 && cached[0]._url) {
-      for (const entry of cached) {
-        if (entry._url) {
-          await this.cache.set(`subtitles:url:${entry.file_id}`, entry._url, CACHE_TTL.SUBTITLES)
-        }
-      }
-      return cached.map(({ _url: _, ...entry }) => entry)
+    const cached = await this.cache.get<SubtitleEntry[]>(cacheKey)
+    if (cached && Array.isArray(cached) && cached.length > 0) return cached
+
+    const params = new URLSearchParams({
+      imdb_id: numericImdb,
+      languages: 'fr',
+      type: season != null ? 'episode' : 'movie',
+    })
+    if (season != null && episode != null) {
+      params.set('season_number', String(season))
+      params.set('episode_number', String(episode))
     }
 
     const data = await got
-      .get(`${this.addonBaseUrl}/subtitles/${mediaType}/${mediaId}.json`)
-      .json<{ subtitles?: StremioSubtitleItem[] }>()
+      .get(`${OSUB_BASE}/subtitles?${params}`, {
+        headers: { 'Api-Key': this.apiKey, 'User-Agent': OSUB_USER_AGENT },
+        timeout: { request: 10_000 },
+        retry: { limit: 1 },
+      })
+      .json<{ data?: OSubEntry[] }>()
 
-    const subtitles = data.subtitles ?? []
-    const entries: CachedSubtitleEntry[] = []
+    const subtitles = data.data ?? []
+    const entries: SubtitleEntry[] = []
+    const seen = new Set<number>()
 
-    for (let i = 0; i < subtitles.length; i++) {
-      const item = subtitles[i]
-      if (!item.url) continue
+    for (const item of subtitles) {
+      const attrs = item.attributes
+      if (!attrs?.files?.length) continue
 
-      const resolvedUrl = this.preferVttUrl(item.url)
-      const language = this.normalizeLanguage(item.lang ?? item.lang_code)
-      const fileId = this.hashUrl(resolvedUrl)
-      const releaseName = item.label ?? item.title ?? item.name ?? String(item.id ?? item.sub_id ?? `Subtitle #${i + 1}`)
+      for (const file of attrs.files) {
+        if (!file.file_id || seen.has(file.file_id)) continue
+        seen.add(file.file_id)
 
-      await this.cache.set(`subtitles:url:${fileId}`, resolvedUrl, CACHE_TTL.SUBTITLES)
-      entries.push({ file_id: fileId, language, release_name: releaseName, hearing_impaired: false, _url: resolvedUrl })
+        const releaseName = attrs.release || attrs.feature_details?.movie_name || file.file_name || 'Unknown'
+        entries.push({
+          file_id: file.file_id,
+          language: this.normalizeLanguage(attrs.language),
+          release_name: releaseName,
+          hearing_impaired: attrs.hearing_impaired ?? false,
+        })
+
+        await this.cache.set(`subtitles:ossub:${file.file_id}`, true, CACHE_TTL.SUBTITLES)
+      }
     }
 
     await this.cache.set(cacheKey, entries, CACHE_TTL.SUBTITLES)
-    return entries.map(({ _url: _, ...entry }) => entry)
+    return entries
   }
 
   async downloadSubtitle(fileId: number, language: string): Promise<SubtitleResult> {
+    const isOssub = await this.cache.get<boolean>(`subtitles:ossub:${fileId}`)
+
+    if (isOssub) {
+      const link = await this.getOsubDownloadLink(fileId)
+      return { url: link, language: this.normalizeLanguage(language) }
+    }
+
+    // Fallback: anciens sous-titres SubSense encore en cache Redis
     const cachedUrl = await this.cache.get<string>(`subtitles:url:${fileId}`)
-    if (!cachedUrl) throw new Error(`Subtitle URL not found in cache for file_id=${fileId}`)
+    if (!cachedUrl) throw new Error(`Subtitle not found for file_id=${fileId}`)
     return { url: cachedUrl, language: this.normalizeLanguage(language) }
   }
 
-  private preferVttUrl(url: string): string {
-    try {
-      const parsed = new URL(url)
-      if (parsed.hostname.includes('wyzie.io')) {
-        parsed.searchParams.set('format', 'vtt')
-      }
-      return parsed.toString()
-    } catch {
-      return url
-    }
-  }
+  private async getOsubDownloadLink(fileId: number): Promise<string> {
+    const data = await got
+      .post(`${OSUB_BASE}/download`, {
+        json: { file_id: fileId, sub_format: 'srt' },
+        headers: {
+          'Api-Key': this.apiKey,
+          'User-Agent': OSUB_USER_AGENT,
+          'Content-Type': 'application/json',
+        },
+        timeout: { request: 10_000 },
+        retry: { limit: 0 },
+      })
+      .json<{ link?: string; message?: string }>()
 
-  private hashUrl(url: string): number {
-    let hash = 5381
-    for (let i = 0; i < url.length; i++) {
-      hash = ((hash << 5) + hash + url.charCodeAt(i)) >>> 0
-    }
-    return hash === 0 ? 1 : hash
-  }
-
-  private resolveAddonBaseUrl(manifestUrl: string): string {
-    const trimmed = manifestUrl.trim().replace(/\/+$/, '')
-    return trimmed.endsWith('/manifest.json') ? trimmed.slice(0, -'/manifest.json'.length) : trimmed
+    if (!data.link) throw new Error(`OSSub download failed: ${data.message ?? 'no link'}`)
+    return data.link
   }
 
   private buildStremioMediaRef(imdbId: string, season?: number, episode?: number) {
@@ -144,5 +158,3 @@ export default class SubtitlesService {
     return lang3to2[normalized] ?? langNameTo2[normalized] ?? normalized
   }
 }
-// Subtitles
-// SubSense

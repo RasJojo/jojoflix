@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -5,6 +7,9 @@ import 'package:go_router/go_router.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 import '../../../core/network/api_client.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../../core/widget/jojoflix_loader.dart';
+import '../../browse/widget/browse_screen.dart';
+import '../../home/repository/home_repository.dart';
 
 part 'search_screen.g.dart';
 
@@ -26,12 +31,32 @@ class SearchScreen extends ConsumerStatefulWidget {
 
 class _SearchScreenState extends ConsumerState<SearchScreen> {
   final _ctrl = TextEditingController();
+  final _focusNode = FocusNode();
   String _query = '';
+  String _debouncedQuery = '';
+  Timer? _debounce;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _focusNode.requestFocus());
+  }
 
   @override
   void dispose() {
+    _debounce?.cancel();
     _ctrl.dispose();
+    _focusNode.dispose();
     super.dispose();
+  }
+
+  void _onQueryChanged(String v) {
+    setState(() => _query = v);
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 400), () {
+      if (mounted) setState(() => _debouncedQuery = v);
+    });
   }
 
   @override
@@ -41,43 +66,50 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // Barre de recherche
             Padding(
               padding: const EdgeInsets.all(AppSpacing.md),
               child: TextField(
                 controller: _ctrl,
-                autofocus: false,
+                focusNode: _focusNode,
                 style: const TextStyle(color: AppColors.textPrimary),
                 decoration: InputDecoration(
                   hintText: 'Films, séries…',
-                  hintStyle: const TextStyle(color: AppColors.textSecondary),
-                  prefixIcon: const Icon(Icons.search, color: AppColors.textSecondary),
+                  hintStyle:
+                      const TextStyle(color: AppColors.textSecondary),
+                  prefixIcon: const Icon(Icons.search,
+                      color: AppColors.textSecondary),
                   suffixIcon: _query.isNotEmpty
                       ? IconButton(
-                          icon: const Icon(Icons.clear, color: AppColors.textSecondary),
+                          icon: const Icon(Icons.clear,
+                              color: AppColors.textSecondary),
                           onPressed: () {
                             _ctrl.clear();
-                            setState(() => _query = '');
+                            _debounce?.cancel();
+                            setState(() {
+                              _query = '';
+                              _debouncedQuery = '';
+                            });
                           },
                         )
                       : null,
                   filled: true,
                   fillColor: AppColors.surface,
                   border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(AppTheme.borderRadius),
+                    borderRadius:
+                        BorderRadius.circular(AppTheme.borderRadius),
                     borderSide: BorderSide.none,
                   ),
                   focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(AppTheme.borderRadius),
-                    borderSide: const BorderSide(color: AppColors.primary, width: 1.5),
+                    borderRadius:
+                        BorderRadius.circular(AppTheme.borderRadius),
+                    borderSide: const BorderSide(
+                        color: AppColors.primary, width: 1.5),
                   ),
                 ),
-                onChanged: (v) => setState(() => _query = v),
+                onChanged: _onQueryChanged,
               ),
             ),
-
-            // Résultats
-            Expanded(child: _SearchResults(query: _query)),
+            Expanded(child: _SearchResults(query: _debouncedQuery)),
           ],
         ),
       ),
@@ -92,13 +124,7 @@ class _SearchResults extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     if (query.trim().length < 2) {
-      return const Center(
-        child: Text(
-          'Tapez au moins 2 caractères pour rechercher',
-          style: TextStyle(color: AppColors.textSecondary),
-          textAlign: TextAlign.center,
-        ),
-      );
+      return _SearchTrending();
     }
 
     final resultsAsync = ref.watch(searchResultsProvider(query));
@@ -119,10 +145,19 @@ class _SearchResults extends ConsumerWidget {
             ),
           );
         }
+        final width = MediaQuery.of(context).size.width;
+        final cols = width >= 1200
+            ? 6
+            : width >= 800
+                ? 5
+                : width >= 600
+                    ? 4
+                    : 3;
         return GridView.builder(
-          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.sm),
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 3,
+          padding: const EdgeInsets.symmetric(
+              horizontal: AppSpacing.md, vertical: AppSpacing.sm),
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: cols,
             childAspectRatio: 2 / 3,
             crossAxisSpacing: AppSpacing.sm,
             mainAxisSpacing: AppSpacing.sm,
@@ -131,6 +166,116 @@ class _SearchResults extends ConsumerWidget {
           itemBuilder: (context, i) => _SearchTile(item: results[i]),
         );
       },
+    );
+  }
+}
+
+class _SearchTrending extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final moviesAsync = ref.watch(browseRowsProvider('movie'));
+    final tvAsync = ref.watch(browseRowsProvider('tv'));
+
+    if (moviesAsync.isLoading && tvAsync.isLoading) {
+      return const JojoflixLoader();
+    }
+
+    final movies = moviesAsync.valueOrNull;
+    final tv = tvAsync.valueOrNull;
+
+    final List<HomeRow> rows = [
+      if (movies != null && movies.isNotEmpty) movies.first,
+      if (tv != null && tv.isNotEmpty) tv.first,
+    ];
+
+    if (rows.isEmpty) return const SizedBox.shrink();
+
+    return ListView(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+              AppSpacing.lg, AppSpacing.lg, AppSpacing.lg, AppSpacing.sm),
+          child: const Text(
+            'Tendances',
+            style: TextStyle(
+              color: AppColors.textPrimary,
+              fontSize: 20,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+        for (final row in rows) _TrendingRow(row: row),
+        const SizedBox(height: AppSpacing.xl),
+      ],
+    );
+  }
+}
+
+class _TrendingRow extends StatelessWidget {
+  final HomeRow row;
+  const _TrendingRow({required this.row});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+              AppSpacing.lg, AppSpacing.md, AppSpacing.lg, AppSpacing.sm),
+          child: Text(
+            row.title,
+            style: const TextStyle(
+              color: AppColors.textSecondary,
+              fontSize: 15,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+        SizedBox(
+          height: 160,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+            itemCount: row.items.length,
+            separatorBuilder: (_, __) => const SizedBox(width: AppSpacing.sm),
+            itemBuilder: (context, i) {
+              final item = row.items[i];
+              return GestureDetector(
+                onTap: () =>
+                    context.push('/detail/${item.mediaType}/${item.tmdbId}'),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: SizedBox(
+                    width: 100,
+                    child: item.posterUrl != null
+                        ? CachedNetworkImage(
+                            imageUrl: item.posterUrl!,
+                            fit: BoxFit.cover,
+                            placeholder: (_, __) =>
+                                Container(color: AppColors.surface),
+                          )
+                        : Container(
+                            color: AppColors.surface,
+                            child: Center(
+                              child: Text(
+                                item.title,
+                                textAlign: TextAlign.center,
+                                maxLines: 3,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                    color: AppColors.textSecondary,
+                                    fontSize: 11),
+                              ),
+                            ),
+                          ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
     );
   }
 }

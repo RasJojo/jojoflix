@@ -108,10 +108,10 @@ export default class TmdbService {
   }
 
   async getMovieDetail(tmdbId: number): Promise<any> {
-    const cacheKey = `tmdb:movie:${tmdbId}:detail`
+    const cacheKey = `tmdb:movie:${tmdbId}:detail:v2`
     return this.cache.remember(cacheKey, CACHE_TTL.TMDB_METADATA, async () => {
       const data = await this.fetch<any>(`/movie/${tmdbId}`, {
-        append_to_response: 'credits,external_ids',
+        append_to_response: 'credits,external_ids,videos',
       })
       return {
         tmdb_id: data.id,
@@ -124,6 +124,8 @@ export default class TmdbService {
         poster_url: this.imageUrl(data.poster_path, 'w342'),
         backdrop_url: this.imageUrl(data.backdrop_path, 'w1280'),
         imdb_id: data.external_ids?.imdb_id,
+        trailer_key: this.extractTrailerKey(data.videos?.results),
+        genres: (data.genres ?? []).map((g: any) => g.name as string),
         cast: (data.credits?.cast ?? []).slice(0, 20).map((c: any) => ({
           person_id: c.id,
           name: c.name,
@@ -136,10 +138,10 @@ export default class TmdbService {
   }
 
   async getTvDetail(tmdbId: number): Promise<any> {
-    const cacheKey = `tmdb:tv:${tmdbId}:detail`
+    const cacheKey = `tmdb:tv:${tmdbId}:detail:v2`
     return this.cache.remember(cacheKey, CACHE_TTL.TMDB_METADATA, async () => {
       const data = await this.fetch<any>(`/tv/${tmdbId}`, {
-        append_to_response: 'credits',
+        append_to_response: 'credits,videos',
       })
       const seasons = await Promise.all(
         (data.seasons ?? [])
@@ -156,6 +158,8 @@ export default class TmdbService {
         runtime: null,
         poster_url: this.imageUrl(data.poster_path, 'w342'),
         backdrop_url: this.imageUrl(data.backdrop_path, 'w1280'),
+        trailer_key: this.extractTrailerKey(data.videos?.results),
+        genres: (data.genres ?? []).map((g: any) => g.name as string),
         cast: (data.credits?.cast ?? []).slice(0, 20).map((c: any) => ({
           person_id: c.id,
           name: c.name,
@@ -165,6 +169,19 @@ export default class TmdbService {
         seasons,
       }
     })
+  }
+
+  private extractTrailerKey(videos: any[] | undefined): string | null {
+    if (!videos?.length) return null
+    const trailer = videos.find(
+      (v: any) =>
+        v.site === 'YouTube' &&
+        (v.type === 'Trailer' || v.type === 'Teaser') &&
+        v.official === true
+    ) ?? videos.find(
+      (v: any) => v.site === 'YouTube' && (v.type === 'Trailer' || v.type === 'Teaser')
+    )
+    return trailer?.key ?? null
   }
 
   async getTvSeason(tmdbId: number, seasonNumber: number): Promise<any> {

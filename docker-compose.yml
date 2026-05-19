@@ -37,6 +37,7 @@ services:
       OPENSUBS_API_KEY: ${OPENSUBS_API_KEY}
       MEDIAFUSION_URL: ${MEDIAFUSION_URL}
       TORRENTIO_URL: ${TORRENTIO_URL:-https://torrentio.strem.fun}
+      DRAMAYO_URL: ${DRAMAYO_URL:-}
     depends_on:
       db:
         condition: service_healthy
@@ -70,6 +71,7 @@ services:
       OPENSUBS_API_KEY: ${OPENSUBS_API_KEY:-placeholder}
       MEDIAFUSION_URL: ${MEDIAFUSION_URL:-}
       TORRENTIO_URL: ${TORRENTIO_URL:-https://torrentio.strem.fun}
+      DRAMAYO_URL: ${DRAMAYO_URL:-}
     depends_on:
       db:
         condition: service_healthy

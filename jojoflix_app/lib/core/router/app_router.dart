@@ -7,6 +7,7 @@ import '../../features/auth/widget/login_screen.dart';
 import '../../features/profiles/widget/profiles_screen.dart';
 import '../../features/home/widget/main_scaffold.dart';
 import '../../features/home/widget/home_screen.dart';
+import '../../features/browse/widget/browse_screen.dart';
 import '../../features/search/widget/search_screen.dart';
 import '../../features/detail/widget/detail_screen.dart';
 import '../../features/detail/widget/person_screen.dart';
@@ -22,6 +23,8 @@ class AppRoutes {
   static const String profileSelect = '/profiles/select';
   static const String profiles = '/profiles';
   static const String home = '/home';
+  static const String browseMovies = '/browse/movie';
+  static const String browseTv = '/browse/tv';
   static const String search = '/search';
   static const String detail = '/detail/:mediaType/:tmdbId';
   static const String person = '/person/:personId';
@@ -81,19 +84,36 @@ GoRouter appRouter(Ref ref) {
         builder: (context, state) => const ProfilesScreen(),
       ),
 
-      // Shell avec NavigationBar/Rail
+      // Shell avec NavigationBar/Rail (toutes les pages sauf player)
       ShellRoute(
         builder: (context, state, child) {
           final location = state.matchedLocation;
           int selectedIndex = 0;
-          if (location.startsWith('/search')) selectedIndex = 1;
-          if (location.startsWith('/profiles')) selectedIndex = 2;
+          if (location.startsWith('/browse/movie')) selectedIndex = 1;
+          if (location.startsWith('/browse/tv')) selectedIndex = 2;
+          if (location.startsWith('/search')) selectedIndex = 3;
+          if (location.startsWith('/profiles')) selectedIndex = 4;
+          // detail et person n'activent aucun onglet
+          if (location.startsWith('/detail') ||
+              location.startsWith('/person')) {
+            selectedIndex = -1;
+          }
           return MainScaffold(selectedIndex: selectedIndex, child: child);
         },
         routes: [
           GoRoute(
             path: AppRoutes.home,
             builder: (context, state) => const HomeScreen(),
+          ),
+          GoRoute(
+            path: AppRoutes.browseMovies,
+            builder: (context, state) =>
+                const BrowseScreen(mediaType: 'movie'),
+          ),
+          GoRoute(
+            path: AppRoutes.browseTv,
+            builder: (context, state) =>
+                const BrowseScreen(mediaType: 'tv'),
           ),
           GoRoute(
             path: AppRoutes.search,
@@ -103,25 +123,23 @@ GoRouter appRouter(Ref ref) {
             path: AppRoutes.profiles,
             builder: (context, state) => const ProfileScreen(),
           ),
+          GoRoute(
+            path: AppRoutes.detail,
+            builder: (context, state) {
+              final tmdbId = state.pathParameters['tmdbId']!;
+              final mediaType = state.pathParameters['mediaType']!;
+              return DetailScreen(tmdbId: tmdbId, mediaType: mediaType);
+            },
+          ),
+          GoRoute(
+            path: AppRoutes.person,
+            builder: (context, state) {
+              final personId =
+                  int.tryParse(state.pathParameters['personId'] ?? '') ?? 0;
+              return PersonScreen(personId: personId);
+            },
+          ),
         ],
-      ),
-
-      GoRoute(
-        path: AppRoutes.detail,
-        builder: (context, state) {
-          final tmdbId = state.pathParameters['tmdbId']!;
-          final mediaType = state.pathParameters['mediaType']!;
-          return DetailScreen(tmdbId: tmdbId, mediaType: mediaType);
-        },
-      ),
-
-      GoRoute(
-        path: AppRoutes.person,
-        builder: (context, state) {
-          final personId =
-              int.tryParse(state.pathParameters['personId'] ?? '') ?? 0;
-          return PersonScreen(personId: personId);
-        },
       ),
 
       GoRoute(

@@ -7,7 +7,6 @@ export const controllers = {
   AccessToken: () => import('#controllers/access_token_controller'),
   Home: () => import('#controllers/home_controller'),
   Media: () => import('#controllers/media_controller'),
-  Monitoring: () => import('#controllers/monitoring_controller'),
   NewAccount: () => import('#controllers/new_account_controller'),
   People: () => import('#controllers/people_controller'),
   Profile: () => import('#controllers/profile_controller'),

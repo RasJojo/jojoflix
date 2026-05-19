@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../../core/network/api_client.dart';
 import '../repository/detail_repository.dart';
 import '../../home/widget/home_screen.dart';
@@ -261,24 +262,49 @@ class _DetailContent extends StatelessWidget {
                 const SizedBox(height: AppSpacing.xs),
 
                 // Meta row
-                Row(
+                Wrap(
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: AppSpacing.sm,
+                  runSpacing: AppSpacing.xs,
                   children: [
-                    if (_year.isNotEmpty) ...[
+                    if (_year.isNotEmpty)
                       Text(_year,
                           style: const TextStyle(
                               color: AppColors.textSecondary, fontSize: 13)),
-                      const SizedBox(width: AppSpacing.md),
-                    ],
-                    if (_ratingLabel.isNotEmpty) ...[
-                      Text(_ratingLabel,
-                          style: const TextStyle(
-                              color: AppColors.primary, fontSize: 13)),
-                      const SizedBox(width: AppSpacing.md),
-                    ],
+                    if (_ratingLabel.isNotEmpty)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: AppColors.primary.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(4),
+                          border: Border.all(
+                              color: AppColors.primary.withValues(alpha: 0.4),
+                              width: 1),
+                        ),
+                        child: Text(_ratingLabel,
+                            style: const TextStyle(
+                                color: AppColors.primary,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600)),
+                      ),
                     if (_runtimeLabel.isNotEmpty)
                       Text(_runtimeLabel,
                           style: const TextStyle(
                               color: AppColors.textSecondary, fontSize: 13)),
+                    for (final genre in detail.genres.take(3))
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: AppColors.surfaceVariant,
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Text(genre,
+                            style: const TextStyle(
+                                color: AppColors.textSecondary,
+                                fontSize: 11)),
+                      ),
                   ],
                 ),
                 const SizedBox(height: AppSpacing.md),
@@ -347,6 +373,26 @@ class _DetailContent extends StatelessWidget {
                     ),
                   ],
                 ),
+                if (detail.trailerKey != null) ...[
+                  const SizedBox(height: AppSpacing.sm),
+                  OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: AppColors.textPrimary,
+                      side: const BorderSide(color: AppColors.surfaceVariant),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: AppSpacing.md, vertical: AppSpacing.md),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(18)),
+                    ),
+                    icon: const Icon(Icons.play_circle_outline, size: 20),
+                    label: const Text('Bande annonce'),
+                    onPressed: () => launchUrl(
+                      Uri.parse(
+                          'https://www.youtube.com/watch?v=${detail.trailerKey}'),
+                      mode: LaunchMode.externalApplication,
+                    ),
+                  ),
+                ],
                 const SizedBox(height: AppSpacing.lg),
 
                 // Overview
@@ -453,19 +499,29 @@ class _CastCard extends StatelessWidget {
         width: 88,
         child: Column(
           children: [
-            CircleAvatar(
-              radius: 34,
-              backgroundColor: AppColors.surface,
-              backgroundImage: member.profileUrl != null
-                  ? CachedNetworkImageProvider(member.profileUrl!)
-                  : null,
-              child: member.profileUrl == null
-                  ? Text(
-                      member.name[0].toUpperCase(),
-                      style: const TextStyle(
-                          color: AppColors.textPrimary, fontSize: 22),
-                    )
-                  : null,
+            ClipOval(
+              child: SizedBox(
+                width: 68,
+                height: 68,
+                child: member.profileUrl != null
+                    ? CachedNetworkImage(
+                        imageUrl: member.profileUrl!,
+                        fit: BoxFit.cover,
+                        alignment: Alignment.topCenter,
+                        placeholder: (_, __) =>
+                            Container(color: AppColors.surface),
+                      )
+                    : Container(
+                        color: AppColors.surface,
+                        child: Center(
+                          child: Text(
+                            member.name[0].toUpperCase(),
+                            style: const TextStyle(
+                                color: AppColors.textPrimary, fontSize: 22),
+                          ),
+                        ),
+                      ),
+              ),
             ),
             const SizedBox(height: 6),
             Text(
@@ -510,21 +566,52 @@ class _SeasonSelector extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        DropdownButton<int>(
-          value: selectedIndex,
-          dropdownColor: AppColors.surface,
-          style: const TextStyle(color: AppColors.textPrimary, fontSize: 16),
-          underline: const SizedBox(),
-          items: List.generate(seasons.length, (i) {
-            return DropdownMenuItem(
-              value: i,
-              child: Text(seasons[i].name),
-            );
-          }),
-          onChanged: (v) {
-            if (v != null) onChanged(v);
-          },
+        const Text(
+          'Saisons',
+          style: TextStyle(
+              color: AppColors.textPrimary,
+              fontSize: 16,
+              fontWeight: FontWeight.w600),
         ),
+        const SizedBox(height: AppSpacing.sm),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            children: List.generate(seasons.length, (i) {
+              final selected = i == selectedIndex;
+              return Padding(
+                padding: const EdgeInsets.only(right: AppSpacing.sm),
+                child: GestureDetector(
+                  onTap: () => onChanged(i),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: AppSpacing.md, vertical: AppSpacing.xs + 2),
+                    decoration: BoxDecoration(
+                      color: selected
+                          ? AppColors.primary
+                          : AppColors.surfaceVariant,
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Text(
+                      seasons[i].name,
+                      style: TextStyle(
+                        color: selected
+                            ? Colors.white
+                            : AppColors.textSecondary,
+                        fontSize: 13,
+                        fontWeight: selected
+                            ? FontWeight.w600
+                            : FontWeight.w400,
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }),
+          ),
+        ),
+        const SizedBox(height: AppSpacing.md),
       ],
     );
   }

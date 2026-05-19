@@ -1,0 +1,90 @@
+services:
+  jojoflix-db:
+    image: postgres:16-alpine
+    container_name: jojoflix-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: jojoflix
+      POSTGRES_PASSWORD: mijoto
+      POSTGRES_DB: jojoflix
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jojoflix -d jojoflix"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+
+  jojoflix-redis:
+    image: redis:7-alpine
+    container_name: jojoflix-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "mijoto"]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a mijoto ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redis_data:/data
+    networks:
+      - internal
+
+  jojoflix-tor:
+    image: dperson/torproxy
+    container_name: jojoflix-tor
+    restart: unless-stopped
+    networks:
+      - internal
+
+  api:
+    image: jojoflix-api:latest
+    container_name: jojoflix-api
+    restart: unless-stopped
+    depends_on:
+      jojoflix-db:
+        condition: service_healthy
+      jojoflix-redis:
+        condition: service_healthy
+      jojoflix-tor:
+        condition: service_started
+    environment:
+      TZ: UTC
+      PORT: 3333
+      HOST: 0.0.0.0
+      NODE_ENV: production
+      LOG_LEVEL: info
+      APP_KEY: zKXHe-Ahdb7aPK1ylAJlRgTefktEaACi
+      APP_URL: https://jojoflix.jojoserv.com
+      SESSION_DRIVER: cookie
+      DB_HOST: jojoflix-db
+      DB_PORT: 5432
+      DB_USER: jojoflix
+      DB_PASSWORD: mijoto
+      DB_DATABASE: jojoflix
+      REDIS_HOST: jojoflix-redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: mijoto
+      RD_API_KEY: LCGDDSNIRHIEK6TRF3NWR3M65RGIL7Q523OCWLTP6ADPKZO3FWWQ
+      TMDB_API_KEY: dec25d4446b780e6f7bd0cce4c1c767f
+      OPENSUBS_API_KEY: vGCZCLvbsRe35Ygmzbhl4H4KxYpao4pd
+      SUBSOURCE_API_KEY: sk_b04ea8d393147d943883eea88c23b001711a8d73d3009cd33c2ee05ee1a3df25
+      TORRENTIO_URL: https://torrentio.strem.fun/realdebrid=LCGDDSNIRHIEK6TRF3NWR3M65RGIL7Q523OCWLTP6ADPKZO3FWWQ
+      TORRENTIO_PROXY: socks5://jojoflix-tor:9050
+      MEDIAFUSION_URL: https://mediafusion.elfhosted.com/D-A9PzeaOk_b4zSxnNbIm7o6bSJDltSZu_9FE4KPSLQYcCdhG7ZL-up0N2mwL-h3SSOsG5OL1DdX0tomUTRsdY-0MjF1c2ZOUXYSRcbAtDzdYTZAsW8v4RtbS_n9iyWsjrfEOCtfrXD_RPvWXBiZc1RhZuLO7zOkQI6DIE5_z7qxSc84jcWZlbyZ0Ly9n-wDDm38MSBreXkk9508xEpAUoLlvKGYdKMkeOtTaapfLMktPAeEhYy2DojUvPAjf4WFLPoazRkObsSdoj1L32K6nUcBOIn-A5CDXzrzCGz5FeDk9SuV593LCsUFrJiph3m4iWerQm1QxHHnhk6KtrO2IfMsVBkO4rjRU3u8CGT2bwt-hUxJura3ppyVfpplGmKWQQ3eduHUnbIWOTuUT9hKs_i-mVekHASrV0g_IjrTpG7KCKBiVM1RYgYixbesNvsk___7tuOrF8-ZHewy4CYUTFuu2668z4No3BK7LDzODOnyvbpjhfGsabHjVN5lxw2vE_c39w0WNJeIKqjUDenVSP98MycHUPMJEPezzHg43HU0A
+      DRAMAYO_URL: https://dramayo.stream
+    networks:
+      - internal
+      - caddy
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  internal:
+    driver: bridge
+  caddy:
+    external: true

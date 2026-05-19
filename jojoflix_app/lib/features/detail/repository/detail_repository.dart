@@ -21,6 +21,8 @@ class MediaDetail {
   final int? runtime; // minutes (movie) or null (tv)
   final List<Season> seasons; // empty for movies
   final List<CastMember> cast;
+  final List<String> genres;
+  final String? trailerKey;
 
   const MediaDetail({
     required this.tmdbId,
@@ -34,6 +36,8 @@ class MediaDetail {
     this.runtime,
     this.seasons = const [],
     this.cast = const [],
+    this.genres = const [],
+    this.trailerKey,
   });
 
   factory MediaDetail.fromJson(Map<String, dynamic> json) {
@@ -55,6 +59,8 @@ class MediaDetail {
       runtime: json['runtime'] as int?,
       seasons: seasons,
       cast: cast,
+      genres: (json['genres'] as List? ?? []).cast<String>(),
+      trailerKey: json['trailer_key'] as String?,
     );
   }
 }

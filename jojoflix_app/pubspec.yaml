@@ -32,6 +32,9 @@ dependencies:
   # HTTP client
   dio: ^5.8.0
 
+  # URL launcher (bandes annonces YouTube)
+  url_launcher: ^6.3.1
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

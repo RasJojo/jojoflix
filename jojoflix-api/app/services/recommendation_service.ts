@@ -2,12 +2,22 @@ import { DateTime } from 'luxon'
 import ProfileInterest from '#models/profile_interest'
 import WatchHistory from '#models/watch_history'
 import TmdbService from '#services/tmdb_service'
-import db from '@adonisjs/lucid/services/db'
 
 const DECAY_DAYS_THRESHOLD = 30
 const DECAY_AMOUNT = 0.5
 const AFFINITY_INCREMENT = 2.0
 const COLD_START_SCORE = 10.0
+
+// TMDB genre IDs stable — pas besoin d'appel réseau pour les labels
+const GENRE_NAMES: Record<number, string> = {
+  28: 'Action', 12: 'Aventure', 16: 'Animation', 35: 'Comédie',
+  80: 'Crime', 99: 'Documentaire', 18: 'Drame', 10751: 'Famille',
+  14: 'Fantaisie', 36: 'Histoire', 27: 'Horreur', 9648: 'Mystère',
+  10749: 'Romance', 878: 'Science-Fiction', 53: 'Thriller',
+  10752: 'Guerre', 37: 'Western', 10759: 'Action & Aventure',
+  10762: 'Enfants', 10765: 'Sci-Fi & Fantastique', 10766: 'Soap',
+  10768: 'Guerre & Politique',
+}
 
 export default class RecommendationService {
   private readonly tmdb: TmdbService
@@ -20,8 +30,11 @@ export default class RecommendationService {
    * Appelé quand un contenu est terminé (is_finished = true).
    * Met à jour affinity_score + applique le decay.
    */
-  async onContentFinished(profileId: number, tmdbId: string, mediaType: 'movie' | 'tv'): Promise<void> {
-    // Récupérer les genres du contenu depuis TMDB
+  async onContentFinished(
+    profileId: number,
+    tmdbId: string,
+    mediaType: 'movie' | 'tv'
+  ): Promise<void> {
     let genreIds: number[] = []
     try {
       if (mediaType === 'movie') {
@@ -32,12 +45,11 @@ export default class RecommendationService {
         genreIds = show.genre_ids
       }
     } catch {
-      return // TMDB indisponible — on skip silencieusement
+      return
     }
 
     const now = DateTime.now()
 
-    // Upsert affinity_score pour chaque genre du contenu
     for (const genreId of genreIds) {
       const existing = await ProfileInterest.query()
         .where('profile_id', profileId)
@@ -58,8 +70,9 @@ export default class RecommendationService {
       }
     }
 
-    // Decay -0.5 sur les genres non regardés depuis plus de 30 jours
+    // Decay -0.5 sur les genres non regardés depuis > 30 jours
     const decayCutoff = now.minus({ days: DECAY_DAYS_THRESHOLD }).toISO()
+    const { default: db } = await import('@adonisjs/lucid/services/db')
     await db
       .from('profile_interests')
       .where('profile_id', profileId)
@@ -72,132 +85,120 @@ export default class RecommendationService {
 
   /**
    * Génère les rangées de la home page pour un profil.
+   * Toutes les fetches indépendantes tournent en parallèle.
    */
   async generateHomeRows(profileId: number): Promise<HomeRow[]> {
     const rows: HomeRow[] = []
 
-    // Rangée 1 : "Parce que vous avez vu X" — TMDB Similar du dernier visionnage
-    const lastWatched = await WatchHistory.query()
-      .where('profile_id', profileId)
-      .orderBy('updated_at', 'desc')
-      .first()
+    // Charge l'historique et les genres favoris en parallèle
+    const [lastWatched, topGenres] = await Promise.all([
+      WatchHistory.query()
+        .where('profile_id', profileId)
+        .orderBy('updated_at', 'desc')
+        .first(),
+      ProfileInterest.query()
+        .where('profile_id', profileId)
+        .where('affinity_score', '>', 0)
+        .orderBy('affinity_score', 'desc')
+        .limit(3),
+    ])
 
+    // ── 1. "Parce que vous avez vu X" ──────────────────────────────────────
     if (lastWatched) {
       try {
-        const similar =
-          lastWatched.mediaType === 'movie'
-            ? await this.tmdb.getSimilarMovies(Number(lastWatched.tmdbId))
-            : await this.tmdb.getSimilarShows(Number(lastWatched.tmdbId))
+        const mediaType = lastWatched.mediaType as 'movie' | 'tv'
+        const [similar, meta] = await Promise.all([
+          mediaType === 'movie'
+            ? this.tmdb.getSimilarMovies(Number(lastWatched.tmdbId))
+            : this.tmdb.getSimilarShows(Number(lastWatched.tmdbId)),
+          mediaType === 'movie'
+            ? this.tmdb.getMovie(Number(lastWatched.tmdbId))
+            : this.tmdb.getTvShow(Number(lastWatched.tmdbId)),
+        ])
 
         if (similar.length > 0) {
-          const title =
-            lastWatched.mediaType === 'movie'
-              ? (await this.tmdb.getMovie(Number(lastWatched.tmdbId))).title
-              : (await this.tmdb.getTvShow(Number(lastWatched.tmdbId))).name
-
           rows.push({
             type: 'similar',
-            title: `Parce que vous avez vu ${title}`,
-            items: similar.slice(0, 20).map(this.normalizeItem),
+            title: `Parce que vous avez vu ${(meta as any).title ?? (meta as any).name}`,
+            items: similar.slice(0, 20).map((i) => this.normalizeItem(i, mediaType)),
           })
         }
-      } catch {
-        // TMDB indisponible — on skip
-      }
+      } catch {}
     }
 
-    // Rangée 2 : "Vos Genres Favoris" — Top 3 genre_id par affinity_score
-    const topGenres = await ProfileInterest.query()
-      .where('profile_id', profileId)
-      .orderBy('affinity_score', 'desc')
-      .limit(3)
-
-    for (const interest of topGenres) {
-      try {
-        const items = await this.tmdb.getTrendingByGenre(interest.genreId, 'movie')
-        if (items.length > 0) {
-          rows.push({
-            type: 'genre',
-            title: 'Vos Genres Favoris',
-            items: items.slice(0, 20).map(this.normalizeItem),
-          })
-          break // Une seule rangée genres favoris
-        }
-      } catch {
-        // skip
-      }
-    }
-
-    // Rangée 3 : "Populaire sur la plateforme" — agrégation watch_histories globales
-    const popular = await db
-      .from('watch_histories')
-      .select('tmdb_id', 'media_type')
-      .count('* as views')
-      .groupBy('tmdb_id', 'media_type')
-      .orderBy('views', 'desc')
-      .limit(20)
-
-    if (popular.length > 0) {
-      const popularItems = await Promise.allSettled(
-        popular.map(async (row) => {
-          if (row.media_type === 'movie') {
-            return this.normalizeItem(await this.tmdb.getMovie(Number(row.tmdb_id)))
-          }
-          return this.normalizeItem(await this.tmdb.getTvShow(Number(row.tmdb_id)))
-        })
+    // ── 2. Genres favoris — movies + séries en parallèle ───────────────────
+    if (topGenres.length > 0) {
+      const genreResults = await Promise.all(
+        topGenres.flatMap((interest) => [
+          this.tmdb.getTrendingByGenre(interest.genreId, 'movie').catch(() => []),
+          this.tmdb.getTrendingByGenre(interest.genreId, 'tv').catch(() => []),
+        ])
       )
 
-      const successItems = popularItems
-        .filter((r): r is PromiseFulfilledResult<HomeItem> => r.status === 'fulfilled')
-        .map((r) => r.value)
+      for (let i = 0; i < topGenres.length; i++) {
+        const genreId = topGenres[i].genreId
+        const genreName = GENRE_NAMES[genreId] ?? `Genre ${genreId}`
+        const movies = genreResults[i * 2]
+        const shows = genreResults[i * 2 + 1]
 
-      if (successItems.length > 0) {
-        rows.push({
-          type: 'popular',
-          title: 'Populaire sur la plateforme',
-          items: successItems,
-        })
+        if (movies.length > 0) {
+          rows.push({
+            type: 'genre',
+            title: `Films · ${genreName}`,
+            items: movies.slice(0, 20).map((it) => this.normalizeItem(it, 'movie')),
+          })
+        }
+        if (shows.length > 0) {
+          rows.push({
+            type: 'genre',
+            title: `Séries · ${genreName}`,
+            items: shows.slice(0, 20).map((it) => this.normalizeItem(it, 'tv')),
+          })
+        }
+        // Max 8 lignes issues des genres favoris
+        if (rows.length >= 8) break
       }
     }
 
-    // Rangée 4 : "Tendances cette semaine" — toujours affiché (cold start)
-    try {
-      const trendingMovies = await this.tmdb.getTrending('movie', 'week')
-      const trendingSeries = await this.tmdb.getTrending('tv', 'week')
-      if (trendingMovies.length > 0) {
-        rows.push({
-          type: 'popular',
-          title: 'Films tendance cette semaine',
-          items: trendingMovies.slice(0, 20).map(this.normalizeItem),
-        })
-      }
-      if (trendingSeries.length > 0) {
-        rows.push({
-          type: 'popular',
-          title: 'Séries tendance cette semaine',
-          items: trendingSeries.slice(0, 20).map(this.normalizeItem),
-        })
-      }
-    } catch {
-      // TMDB indisponible
+    // ── 3. Tendances (cold-start garanti) ──────────────────────────────────
+    const [trendingMovies, trendingShows] = await Promise.all([
+      this.tmdb.getTrending('movie', 'week').catch(() => []),
+      this.tmdb.getTrending('tv', 'week').catch(() => []),
+    ])
+
+    if (trendingMovies.length > 0) {
+      rows.push({
+        type: 'popular',
+        title: 'Films tendance cette semaine',
+        items: trendingMovies.slice(0, 20).map((it) => this.normalizeItem(it, 'movie')),
+      })
+    }
+    if (trendingShows.length > 0) {
+      rows.push({
+        type: 'popular',
+        title: 'Séries tendance cette semaine',
+        items: trendingShows.slice(0, 20).map((it) => this.normalizeItem(it, 'tv')),
+      })
     }
 
     return rows
   }
 
-  private normalizeItem(item: any): HomeItem {
+  // Normalise un item TMDB en HomeItem avec mediaType explicite
+  // (évite l'heuristique fragile title/name)
+  private normalizeItem(item: any, mediaType: 'movie' | 'tv'): HomeItem {
     return {
-      tmdb_id: item.tmdb_id,
-      title: item.title ?? item.name,
-      media_type: item.title ? 'movie' : 'tv',
-      poster_url: item.poster_url,
-      backdrop_url: item.backdrop_url,
+      tmdb_id: String(item.tmdb_id ?? item.id),
+      title: (item.title ?? item.name ?? '') as string,
+      media_type: mediaType,
+      poster_url: item.poster_url ?? null,
+      backdrop_url: item.backdrop_url ?? null,
     }
   }
 }
 
 export interface HomeItem {
-  tmdb_id: number
+  tmdb_id: string
   title: string
   media_type: 'movie' | 'tv'
   poster_url: string | null
@@ -209,4 +210,3 @@ export interface HomeRow {
   title: string
   items: HomeItem[]
 }
-// Recommendations

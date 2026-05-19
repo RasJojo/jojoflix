@@ -71,7 +71,8 @@
     "ioredis": "^5.10.0",
     "luxon": "^3.7.2",
     "pg": "^8.20.0",
-    "reflect-metadata": "^0.2.2"
+    "reflect-metadata": "^0.2.2",
+    "socks-proxy-agent": "^10.0.0"
   },
   "hotHook": {
     "boundaries": [

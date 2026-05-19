@@ -57,6 +57,7 @@ router
 
     // ── Home ─────────────────────────────────────────────────────────────────
     router.get('home/:profile_id', [HomeController, 'show']).use(middleware.auth())
+    router.get('browse/:mediaType', [HomeController, 'browse']).use(middleware.auth())
 
     // ── Sources (sélecteur manuel) ────────────────────────────────────────────
     router

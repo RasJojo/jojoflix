@@ -329,8 +329,8 @@ export default class SubtitlesController {
   private async fetchNormalizedVtt(subtitleUrl: string): Promise<string> {
     const rawBuffer = await got
       .get(subtitleUrl, {
-        timeout: { request: 15000 },
-        retry: { limit: 1 },
+        timeout: { request: 12000 },
+        retry: { limit: 0 },
       })
       .buffer()
 

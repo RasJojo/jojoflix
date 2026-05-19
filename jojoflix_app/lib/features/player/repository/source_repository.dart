@@ -13,6 +13,7 @@ SourceRepository sourceRepository(Ref ref) {
 class TorrentSource {
   final String key;
   final String name;
+  final String rawName;
   final String resolution;
   final double? sizeGb;
   final List<String> tags;
@@ -26,6 +27,7 @@ class TorrentSource {
   const TorrentSource({
     required this.key,
     required this.name,
+    this.rawName = '',
     required this.resolution,
     this.sizeGb,
     required this.tags,
@@ -47,6 +49,7 @@ class TorrentSource {
               json['name'] as String? ??
               ''),
       name: json['name'] as String,
+      rawName: json['raw_name'] as String? ?? '',
       resolution: json['resolution'] as String,
       sizeGb: (json['size_gb'] as num?)?.toDouble(),
       tags: (json['tags'] as List?)?.cast<String>() ?? [],

@@ -4,7 +4,7 @@ import got from 'got'
 import crypto from 'node:crypto'
 
 const RD_BASE_URL = 'https://api.real-debrid.com/rest/1.0'
-const RD_BLOCKED_TTL_SECONDS = 2 * 60 * 60 // 2h
+const RD_BLOCKED_TTL_SECONDS = 15 * 60 // 15min
 const RD_UNAVAILABLE_TTL_SECONDS = 20 * 60 // 20 min
 
 interface UnrestrictOptions {

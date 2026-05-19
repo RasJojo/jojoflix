@@ -43,5 +43,6 @@ export default await Env.create(new URL('../', import.meta.url), {
   OPENSUBS_API_KEY: Env.schema.secret(),
   MEDIAFUSION_URL: Env.schema.string.optional(),
   TORRENTIO_URL: Env.schema.string.optional(),
+  TORRENTIO_PROXY: Env.schema.string.optional(),
   DRAMAYO_URL: Env.schema.string.optional(),
 })
