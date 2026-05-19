@@ -207,9 +207,10 @@ export default class TorrentScoringService {
       ])
       mediaFusionRaw = await this.filterDeadDirectUrls(mediaFusionRaw)
     } else {
-      ;[torrentioRaw, mediaFusionRaw] = await Promise.all([
+      ;[torrentioRaw, mediaFusionRaw, dramaYoRaw] = await Promise.all([
         this.fetchTorrentio(tmdbId, mediaType, season, episode),
         this.fetchMediaFusion(tmdbId, mediaType, season, episode, 'fast'),
+        this.fetchDramaYo(tmdbId, mediaType, season, episode),
       ])
       mediaFusionRaw = await this.filterDeadDirectUrls(mediaFusionRaw)
     }
@@ -810,9 +811,9 @@ export default class TorrentScoringService {
     mode: SourceProvidersMode = 'fast'
   ): string {
     if (mediaType === 'tv' && season && episode) {
-      return `sources:v10:${mode}:${mediaType}:${tmdbId}:s${season}e${episode}`
+      return `sources:v11:${mode}:${mediaType}:${tmdbId}:s${season}e${episode}`
     }
-    return `sources:v10:${mode}:${mediaType}:${tmdbId}`
+    return `sources:v11:${mode}:${mediaType}:${tmdbId}`
   }
 
   private async probeUrl(url: string): Promise<boolean> {

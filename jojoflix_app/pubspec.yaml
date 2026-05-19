@@ -32,8 +32,8 @@ dependencies:
   # HTTP client
   dio: ^5.8.0
 
-  # URL launcher (bandes annonces YouTube)
-  url_launcher: ^6.3.1
+  # Trailer YouTube intégré
+  youtube_explode_dart: ^3.1.0
 
 dev_dependencies:
   flutter_test:

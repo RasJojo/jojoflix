@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
-import 'package:url_launcher/url_launcher.dart';
+import 'trailer_screen.dart';
 import '../../../core/network/api_client.dart';
 import '../repository/detail_repository.dart';
 import '../../home/widget/home_screen.dart';
@@ -386,10 +386,15 @@ class _DetailContent extends StatelessWidget {
                     ),
                     icon: const Icon(Icons.play_circle_outline, size: 20),
                     label: const Text('Bande annonce'),
-                    onPressed: () => launchUrl(
-                      Uri.parse(
-                          'https://www.youtube.com/watch?v=${detail.trailerKey}'),
-                      mode: LaunchMode.externalApplication,
+                    onPressed: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        fullscreenDialog: true,
+                        builder: (_) => TrailerScreen(
+                          trailerKey: detail.trailerKey!,
+                          title: detail.title,
+                        ),
+                      ),
                     ),
                   ),
                 ],
