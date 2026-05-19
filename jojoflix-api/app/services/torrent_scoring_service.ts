@@ -3,10 +3,12 @@ import CacheWrapper, { CACHE_TTL } from '#services/cache_wrapper'
 import TmdbService from '#services/tmdb_service'
 import got from 'got'
 import crypto from 'node:crypto'
+import { SocksProxyAgent } from 'socks-proxy-agent'
 
 export interface TorrentSource {
   key: string
   name: string
+  raw_name: string
   resolution: string
   size_gb: number | null
   tags: string[]
@@ -80,15 +82,20 @@ const GERMAN_PATTERNS = [/\bgerman\b/i, /\ballemand\b/i, /\bdeu\b/i, /\bger\b/i,
 const ITALIAN_PATTERNS = [/\bitalian\b/i, /\bitalien\b/i, /\bita\b/i, /🇮🇹/u]
 const SPANISH_PATTERNS = [/\bspanish\b/i, /\bespagnol\b/i, /\bspa\b/i, /🇪🇸/u]
 const PORTUGUESE_PATTERNS = [/\bportuguese\b/i, /\bportugais\b/i, /\bpor\b/i, /🇵🇹/u, /🇧🇷/u]
-const RUSSIAN_PATTERNS = [/\brussian\b/i, /\brusse\b/i, /\brus\b/i, /🇷🇺/u]
-const POLISH_PATTERNS = [/\bpolish\b/i, /\bpolonais\b/i, /\bpol\b/i, /🇵🇱/u]
-const TURKISH_PATTERNS = [/\bturkish\b/i, /\bturc\b/i, /\btur\b/i, /🇹🇷/u]
-const CZECH_PATTERNS = [/\bczech\b/i, /\btcheque\b/i, /\bcze\b/i, /🇨🇿/u]
-const HUNGARIAN_PATTERNS = [/\bhungarian\b/i, /\bhongrois\b/i, /\bhun\b/i, /🇭🇺/u]
-const UKRAINIAN_PATTERNS = [/\bukrainian\b/i, /\bukrainien\b/i, /\bukr\b/i, /🇺🇦/u]
+const RUSSIAN_PATTERNS = [/\brussian\b/i, /\brusse\b/i, /\brus\b/i, /🇷🇺/u, /\bru\b/i]
+const POLISH_PATTERNS = [/\bpolish\b/i, /\bpolonais\b/i, /\bpol\b/i, /🇵🇱/u, /\bpl\b/i, /\blektor\b/i, /\bnapisy\b/i]
+const TURKISH_PATTERNS = [/\bturkish\b/i, /\bturc\b/i, /\btur\b/i, /🇹🇷/u, /\btr\b/i]
+const CZECH_PATTERNS = [/\bczech\b/i, /\btcheque\b/i, /\bcze\b/i, /🇨🇿/u, /\bcz\b/i]
+const HUNGARIAN_PATTERNS = [/\bhungarian\b/i, /\bhongrois\b/i, /\bhun\b/i, /🇭🇺/u, /\bhu\b/i]
+const UKRAINIAN_PATTERNS = [/\bukrainian\b/i, /\bukrainien\b/i, /\bukr\b/i, /🇺🇦/u, /\bua\b/i]
 const ARABIC_PATTERNS = [/\barabic\b/i, /\barabe\b/i, /\bara\b/i, /🇸🇦/u]
 const CHINESE_PATTERNS = [/\bchinese\b/i, /\bchinois\b/i, /\bchi\b/i, /\bzho\b/i, /🇨🇳/u]
 const VOSTFR_PATTERNS = [/\bVOSTFR\b/i, /\bSUBFRENCH\b/i, /\bVOST\b/i]
+const RUSSIAN_RELEASE_GROUP_PATTERNS = [
+  /\b(NewStudio|Jaskier|ColdFilm|AlexFilm|HamsterStudio|BaibaKo|Kerob|SmartCom)\b/i,
+  /\b(LostFilm|Amedia|FoxLife|Gears\s*Media|ViruseProject)\b/i,
+]
+const CYRILLIC_PATTERN = /[а-яА-ЯёЁ]{3,}/
 const COMPACT_LANGUAGE_CODES = [
   'french',
   'francais',
@@ -154,18 +161,20 @@ const COMPACT_LANGUAGE_PREFIX_RE = new RegExp(
 
 export default class TorrentScoringService {
   private readonly cache: CacheWrapper
-  private readonly torrentioUrl: string
+  private readonly torrentioUrl: string | null
   private readonly mediaFusionUrl: string | null
   private readonly dramaYoUrl: string | null
   private readonly tmdb: TmdbService
+  private readonly torrentioProxyAgent: SocksProxyAgent | undefined
 
   constructor() {
     this.cache = new CacheWrapper()
-    this.torrentioUrl =
-      this.normalizeAddonBaseUrl(env.get('TORRENTIO_URL')) ?? 'https://torrentio.strem.fun'
+    this.torrentioUrl = this.normalizeAddonBaseUrl(env.get('TORRENTIO_URL'))
     this.mediaFusionUrl = this.normalizeAddonBaseUrl(env.get('MEDIAFUSION_URL'))
     this.dramaYoUrl = this.normalizeAddonBaseUrl(env.get('DRAMAYO_URL'))
     this.tmdb = new TmdbService()
+    const proxyUrl = env.get('TORRENTIO_PROXY')
+    this.torrentioProxyAgent = proxyUrl ? new SocksProxyAgent(proxyUrl) : undefined
   }
 
   async scoreAndSelectSource(
@@ -196,27 +205,41 @@ export default class TorrentScoringService {
         this.fetchMediaFusion(tmdbId, mediaType, season, episode, 'full'),
         this.fetchDramaYo(tmdbId, mediaType, season, episode),
       ])
+      mediaFusionRaw = await this.filterDeadDirectUrls(mediaFusionRaw)
     } else {
-      torrentioRaw = await this.fetchTorrentio(tmdbId, mediaType, season, episode)
-      if (torrentioRaw.length === 0) {
-        mediaFusionRaw = await this.fetchMediaFusion(tmdbId, mediaType, season, episode, 'fast')
-      }
+      ;[torrentioRaw, mediaFusionRaw] = await Promise.all([
+        this.fetchTorrentio(tmdbId, mediaType, season, episode),
+        this.fetchMediaFusion(tmdbId, mediaType, season, episode, 'fast'),
+      ])
+      mediaFusionRaw = await this.filterDeadDirectUrls(mediaFusionRaw)
     }
 
-    const scored = [
+    const allCandidates = [
       ...mediaFusionRaw.map((item) =>
         this.scoreCandidate(item, 'mediafusion', season, episode)
       ),
       ...dramaYoRaw.map((item) => this.scoreCandidate(item, 'dramayo', season, episode)),
       ...torrentioRaw.map((item) => this.scoreCandidate(item, 'torrentio', season, episode)),
-    ]
-      .filter((item) => item.source.magnet.length > 0 || item.source.direct_url)
+    ].filter((item) => item.source.magnet.length > 0 || item.source.direct_url)
+
+    const beforeFilter = allCandidates.length
+    const scored = allCandidates
+      .filter((item) => !this.isUnwantedDub(item.source))
       .sort((a, b) => this.compareCandidates(a, b, mediaType))
       .map((item) => item.source)
+    const filteredOut = beforeFilter - scored.length
+    if (filteredOut > 0) {
+      console.info(`[sources] filtered ${filteredOut} non-FR/EN dub sources out of ${beforeFilter}`)
+    }
 
     if (scored.length === 0) {
       throw new Error('NO_SOURCE_FOUND')
     }
+
+    const best = scored[0]
+    console.info(
+      `[sources] tmdb=${tmdbId} type=${mediaType} s=${season ?? '-'} e=${episode ?? '-'} mode=${mode} total=${scored.length} mf=${mediaFusionRaw.length} tio=${torrentioRaw.length} dy=${dramaYoRaw.length} best="${best.name}" provider=${best.provider} pref_rank=${best.preference_rank}`
+    )
 
     await this.cache.set(cacheKey, scored, CACHE_TTL.TORRENTIO)
     return { best: scored[0], all: scored }
@@ -289,8 +312,6 @@ export default class TorrentScoringService {
       }
     }
 
-    // Les sources MediaFusion (url directe) sont boostées — plus rapides car déjà résolues
-    if (item.url) totalScore += 200
 
     const resolution = this.extractResolution(fullText)
     const sizeGb =
@@ -308,6 +329,7 @@ export default class TorrentScoringService {
     return {
       key,
       name: this.cleanName(item.behaviorHints?.filename ?? name),
+      raw_name: `${name} ${item.description ?? ''}`.trim(),
       resolution,
       size_gb: sizeGb,
       tags: [...new Set(tags)],
@@ -358,7 +380,12 @@ export default class TorrentScoringService {
     mediaType: 'movie' | 'tv'
   ): number {
     if (mediaType === 'tv' && a.sort.episodeLabelRank !== b.sort.episodeLabelRank) {
-      return a.sort.episodeLabelRank - b.sort.episodeLabelRank
+      // N'appliquer la priorité "épisode exact" que si la qualité de langue est proche.
+      // Sinon une source polonaise sans label (rang 11) avec S5E7 explicite battrait
+      // un pack anglais (rang 5) à cause du rang épisode — ce qu'on ne veut pas.
+      if (Math.abs(a.sort.languageRank - b.sort.languageRank) <= 3) {
+        return a.sort.episodeLabelRank - b.sort.episodeLabelRank
+      }
     }
     if (a.sort.languageRank !== b.sort.languageRank) {
       return a.sort.languageRank - b.sort.languageRank
@@ -444,6 +471,8 @@ export default class TorrentScoringService {
     const hasSpanish = SPANISH_PATTERNS.some((pattern) => pattern.test(normalizedText))
     const hasPortuguese = PORTUGUESE_PATTERNS.some((pattern) => pattern.test(normalizedText))
     const hasRussian = RUSSIAN_PATTERNS.some((pattern) => pattern.test(normalizedText))
+    const hasRussianReleaseGroup = RUSSIAN_RELEASE_GROUP_PATTERNS.some((p) => p.test(text))
+    const hasCyrillic = CYRILLIC_PATTERN.test(text)
     const hasPolish = POLISH_PATTERNS.some((pattern) => pattern.test(normalizedText))
     const hasTurkish = TURKISH_PATTERNS.some((pattern) => pattern.test(normalizedText))
     const hasCzech = CZECH_PATTERNS.some((pattern) => pattern.test(normalizedText))
@@ -465,7 +494,9 @@ export default class TorrentScoringService {
       hasHungarian ||
       hasUkrainian ||
       hasArabic ||
-      hasChinese
+      hasChinese ||
+      hasRussianReleaseGroup ||
+      hasCyrillic
 
     if (/\b(TRUEFRENCH|VFF|VFQ)\b/i.test(normalizedText)) return 0
     if (hasFrench && !hasVostfr && !hasMulti && languageCount <= 1) return 1
@@ -483,7 +514,7 @@ export default class TorrentScoringService {
     if (hasJapanese && !hasExplicitDisfavoredLanguage) return 13
     if (hasKorean && !hasExplicitDisfavoredLanguage) return 14
     if (hasExplicitDisfavoredLanguage) return 41 + languageCount
-    return 26 + languageCount
+    return 30 + languageCount
   }
 
   private countListedLanguages(text: string): number {
@@ -516,15 +547,12 @@ export default class TorrentScoringService {
   }
 
   private extractCachedRank(text: string, source: TorrentSource): number {
-    if (/⚡|cached/i.test(text)) return 2
-    if (source.has_direct_url) return 1
+    if (/⚡|cached/i.test(text) || source.has_direct_url) return 1
     return 0
   }
 
-  private extractProviderRank(source: TorrentSource): number {
-    if (source.provider === 'torrentio') return 0
-    if (source.provider === 'mediafusion') return 1
-    return 2 // dramayo : complément de dernier recours dans le slow path
+  private extractProviderRank(_source: TorrentSource): number {
+    return 0
   }
 
   private resolutionRank(resolution: string): number {
@@ -574,6 +602,7 @@ export default class TorrentScoringService {
     season?: number,
     episode?: number
   ): Promise<any[]> {
+    if (!this.torrentioUrl) return []
     // Résoudre l'IMDB ID depuis TMDB (Torrentio requiert un vrai IMDB ID)
     const imdbId = await this.tmdb.getImdbId(Number(tmdbId), mediaType)
     if (!imdbId) return []
@@ -599,6 +628,9 @@ export default class TorrentScoringService {
               'user-agent': 'Mozilla/5.0 (JOJOFLIX)',
               'accept': 'application/json',
             },
+            ...(this.torrentioProxyAgent
+              ? { agent: { https: this.torrentioProxyAgent, http: this.torrentioProxyAgent } }
+              : {}),
           })
           .json<{ streams?: any[] }>()
         const streams = data.streams ?? []
@@ -608,7 +640,15 @@ export default class TorrentScoringService {
               `[sources:torrentio] episode-fallback tmdb=${tmdbId} req=s${season}e${episode} used=${candidateId}`
             )
           }
+          // Torrentio uses `title` for release details (language flags, size, etc.) — move to description.
+          // Exclure les streams "not ready" que Torrentio retourne pour les torrents en cours de téléchargement RD.
+          const NOT_READY_RE = /not\s+downloaded|not\s+ready|download\s+in\s+progress/i
           return streams
+            .filter((s: any) => !NOT_READY_RE.test(s.name ?? '') && !NOT_READY_RE.test(s.title ?? ''))
+            .map((s: any) => ({
+              ...s,
+              description: [s.description, s.title].filter(Boolean).join(' ') || undefined,
+            }))
         }
       } catch (error) {
         lastError = error instanceof Error ? error.message : 'unknown error'
@@ -648,8 +688,8 @@ export default class TorrentScoringService {
     for (const candidateId of idCandidates) {
       try {
         const url = `${this.mediaFusionUrl}/stream/${type}/${candidateId}.json`
-        const connectTimeoutMs = mode === 'full' ? 5_000 : 3_000
-        const requestTimeoutMs = mode === 'full' ? 45_000 : 5_000
+        const connectTimeoutMs = mode === 'full' ? 5_000 : 5_000
+        const requestTimeoutMs = mode === 'full' ? 45_000 : 12_000
         const data = await got
           .get(url, {
             retry: { limit: 0 },
@@ -770,9 +810,81 @@ export default class TorrentScoringService {
     mode: SourceProvidersMode = 'fast'
   ): string {
     if (mediaType === 'tv' && season && episode) {
-      return `sources:v5:${mode}:${mediaType}:${tmdbId}:s${season}e${episode}`
+      return `sources:v10:${mode}:${mediaType}:${tmdbId}:s${season}e${episode}`
     }
-    return `sources:v5:${mode}:${mediaType}:${tmdbId}`
+    return `sources:v10:${mode}:${mediaType}:${tmdbId}`
+  }
+
+  private async probeUrl(url: string): Promise<boolean> {
+    try {
+      const response = await got.head(url, {
+        retry: { limit: 0 },
+        timeout: { connect: 2_000, request: 4_000 },
+        followRedirect: true,
+        throwHttpErrors: false,
+      })
+      return response.statusCode >= 200 && response.statusCode < 400
+    } catch {
+      // Timeout ou erreur réseau : on garde l'URL, le streaming controller vérifie au moment de la lecture
+      return true
+    }
+  }
+
+  private async filterDeadDirectUrls(rawItems: any[]): Promise<any[]> {
+    const results = await Promise.all(
+      rawItems.map(async (item) => {
+        if (!item.url) return item
+        const alive = await this.probeUrl(item.url)
+        if (!alive) {
+          console.warn(
+            `[sources:mediafusion] dead direct_url filtered: ${(item.name ?? '').slice(0, 60)}`
+          )
+          return item.infoHash ? { ...item, url: undefined } : null
+        }
+        return item
+      })
+    )
+    return results.filter(Boolean)
+  }
+
+  private isUnwantedDub(source: TorrentSource): boolean {
+    const text = source.raw_name
+    const normalizedText = this.normalizeLanguageText(text)
+
+    if (FRENCH_PATTERNS.some((p) => p.test(normalizedText))) return false
+    if (VOSTFR_PATTERNS.some((p) => p.test(normalizedText))) return false
+    if (ENGLISH_PATTERNS.some((p) => p.test(normalizedText))) return false
+    if (JAPANESE_PATTERNS.some((p) => p.test(normalizedText))) return false
+    if (KOREAN_PATTERNS.some((p) => p.test(normalizedText))) return false
+
+    return (
+      GERMAN_PATTERNS.some((p) => p.test(normalizedText)) ||
+      ITALIAN_PATTERNS.some((p) => p.test(normalizedText)) ||
+      SPANISH_PATTERNS.some((p) => p.test(normalizedText)) ||
+      PORTUGUESE_PATTERNS.some((p) => p.test(normalizedText)) ||
+      RUSSIAN_PATTERNS.some((p) => p.test(normalizedText)) ||
+      POLISH_PATTERNS.some((p) => p.test(normalizedText)) ||
+      TURKISH_PATTERNS.some((p) => p.test(normalizedText)) ||
+      CZECH_PATTERNS.some((p) => p.test(normalizedText)) ||
+      HUNGARIAN_PATTERNS.some((p) => p.test(normalizedText)) ||
+      UKRAINIAN_PATTERNS.some((p) => p.test(normalizedText)) ||
+      ARABIC_PATTERNS.some((p) => p.test(normalizedText)) ||
+      CHINESE_PATTERNS.some((p) => p.test(normalizedText)) ||
+      RUSSIAN_RELEASE_GROUP_PATTERNS.some((p) => p.test(text)) ||
+      CYRILLIC_PATTERN.test(text)
+    )
+  }
+
+  async invalidateSources(
+    tmdbId: string,
+    mediaType: 'movie' | 'tv',
+    season?: number,
+    episode?: number
+  ): Promise<void> {
+    await Promise.all([
+      this.cache.forget(this.cacheKey(tmdbId, mediaType, season, episode, 'fast')),
+      this.cache.forget(this.cacheKey(tmdbId, mediaType, season, episode, 'full')),
+    ])
   }
 
   private normalizeAddonBaseUrl(url?: string | null): string | null {

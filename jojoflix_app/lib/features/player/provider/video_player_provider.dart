@@ -394,6 +394,10 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
       scale: _subtitleScale,
     );
 
+    // Supprimer les data tracks injectés précédemment avant d'en ajouter un nouveau.
+    // Sans ce nettoyage, chaque ajustement de sync accumule des tracks dans mpv,
+    // ce qui peut faire activer la mauvaise piste (bug sync) et polluer la liste UI.
+    await _removeInjectedSubtitleTracks();
     await _player.setSubtitleTrack(SubtitleTrack.no());
     await _player.setSubtitleTrack(
       SubtitleTrack.data(
@@ -403,6 +407,31 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
       ),
     );
     _refreshTrackRefs();
+  }
+
+  /// Supprime via mpv toutes les pistes sous-titres injectées dynamiquement
+  /// (data ou uri) pour éviter leur accumulation entre deux ajustements.
+  /// Best-effort : silencieux si le backend mpv n'est pas disponible.
+  Future<void> _removeInjectedSubtitleTracks() async {
+    final injected = _player.state.tracks.subtitle
+        .where((t) => t.data || t.uri)
+        .toList(growable: false);
+    if (injected.isEmpty) return;
+
+    final platform = _player.platform;
+    if (platform == null) return;
+
+    for (final track in injected) {
+      final idStr = track.id.toString();
+      if (idStr.isEmpty || idStr == 'no' || idStr == 'auto') {
+        continue;
+      }
+      try {
+        await (platform as dynamic).command(['sub-remove', idStr]);
+      } catch (_) {
+        // sub-remove indisponible sur cette plateforme — on continue.
+      }
+    }
   }
 
   Future<void> _loadEmbeddedSubtitleTrackAsVtt(PlayerTrack track) async {
@@ -703,28 +732,33 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
   }
 
   List<SubtitleTrack> _filterNativeSubtitleTracks(List<SubtitleTrack> tracks) {
-    final explicitNativeTracks = tracks
-        .where((track) =>
-            track.id != 'no' && track.id != 'auto' && !track.uri && !track.data)
-        .toList(growable: false);
+    // Prédicat commun : on n'expose jamais les pistes virtuelles ni les pistes
+    // injectées dynamiquement (data/uri) dans la liste "pistes intégrées".
+    bool isNative(SubtitleTrack t) =>
+        t.id != 'no' && t.id != 'auto' && !t.uri && !t.data;
+
+    final explicitNativeTracks =
+        tracks.where(isNative).toList(growable: false);
 
     if (explicitNativeTracks.isNotEmpty) {
       _knownNativeSubtitleTrackIds =
-          explicitNativeTracks.map((track) => track.id).toSet();
+          explicitNativeTracks.map((t) => t.id).toSet();
       return explicitNativeTracks;
     }
 
+    // Pas encore de pistes natives connues : retourner uniquement les vraies
+    // pistes natives (filtre identique). Ne jamais remonter les data tracks
+    // accumulées par les injections de sous-titres externes.
     if (_knownNativeSubtitleTrackIds.isEmpty) {
-      return tracks
-          .where((track) => track.id != 'no' && track.id != 'auto')
-          .toList(growable: false);
+      return tracks.where(isNative).toList(growable: false);
     }
 
+    // Des pistes natives ont été détectées précédemment : se limiter à celles-ci.
     return tracks
-        .where((track) =>
-            track.id != 'no' &&
-            track.id != 'auto' &&
-            _knownNativeSubtitleTrackIds.contains(track.id))
+        .where((t) =>
+            t.id != 'no' &&
+            t.id != 'auto' &&
+            _knownNativeSubtitleTrackIds.contains(t.id))
         .toList(growable: false);
   }
 
@@ -905,9 +939,48 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
     await _player.open(Media(streamUrl));
     await _waitForTrackRefresh();
     await _applyPreferredFrenchAudioTrackWithRetry();
+    _maybeAutoSelectFrenchSubtitle();
     await _restoreSubtitleSelectionAfterOpen();
     _refreshTrackRefs();
     await _tryApplyStartPosition();
+  }
+
+  void _maybeAutoSelectFrenchSubtitle() {
+    if (_subtitleSelectionMode != _SubtitleSelectionMode.off) return;
+
+    _refreshTrackRefs();
+    if (_subtitleTrackRefs.isEmpty) return;
+
+    // Ne pas auto-sélectionner si l'audio est déjà français (contenu VF)
+    final activeAudio = _player.state.track.audio;
+    final audioLang = activeAudio.language?.trim().toLowerCase() ?? '';
+    final audioTitle = activeAudio.title?.trim().toLowerCase() ?? '';
+    final isFrenchAudio = audioLang == 'fr' || audioLang == 'fra' || audioLang == 'fre' ||
+        RegExp(r'\b(truefrench|vff|vfq|vf|french|français|francais)\b',
+            caseSensitive: false)
+            .hasMatch('$audioLang $audioTitle');
+    if (isFrenchAudio) return;
+
+    // Chercher une piste de sous-titres français intégrée
+    final frenchSubRe = RegExp(
+      r'\b(french|français|francais|truefrench|vff|vfq|vfq|vostfr|subfrench|fr)\b',
+      caseSensitive: false,
+    );
+    for (int i = 0; i < _subtitleTrackRefs.length; i++) {
+      final track = _subtitleTrackRefs[i];
+      final lang = track.language?.trim().toLowerCase() ?? '';
+      final title = track.title?.trim().toLowerCase() ?? '';
+      if (lang == 'fr' || lang == 'fra' || lang == 'fre' ||
+          lang.startsWith('fr-') ||
+          frenchSubRe.hasMatch(title)) {
+        _selectedEmbeddedSubtitleTrack = PlayerTrack(
+          id: i,
+          label: _subtitleTrackLabel(_subtitleTrackRefs[i], i),
+        );
+        _subtitleSelectionMode = _SubtitleSelectionMode.embedded;
+        return;
+      }
+    }
   }
 
   Future<void> _restoreSubtitleSelectionAfterOpen() async {
@@ -1058,16 +1131,27 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
     final title = track.title?.trim().toLowerCase() ?? '';
     final combined = '$language $title'.trim();
 
-    if (language == 'fr' || language == 'fra' || language == 'fre') return 4;
+    // French — highest priority
+    if (language == 'fr' || language == 'fra' || language == 'fre') { return 10; }
     if (RegExp(r'\b(truefrench|vff|vfq|french|français|francais)\b',
             caseSensitive: false)
-        .hasMatch(combined)) {
-      return 3;
-    }
+        .hasMatch(combined)) { return 9; }
     if (RegExp(r'(^|[^a-z])vf([^a-z]|$)', caseSensitive: false)
-        .hasMatch(combined)) {
-      return 2;
-    }
+        .hasMatch(combined)) { return 8; }
+
+    // Japanese = Korean (anime / K-drama)
+    if (language == 'ja' || language == 'jpn') { return 5; }
+    if (language == 'ko' || language == 'kor') { return 5; }
+    if (RegExp(r'\b(japanese|japonais|jpn)\b', caseSensitive: false)
+        .hasMatch(combined)) { return 4; }
+    if (RegExp(r'\b(korean|cor[eé]en|kor)\b', caseSensitive: false)
+        .hasMatch(combined)) { return 4; }
+
+    // English — fallback
+    if (language == 'en' || language == 'eng') { return 2; }
+    if (RegExp(r'\b(english|anglais|eng)\b', caseSensitive: false)
+        .hasMatch(combined)) { return 1; }
+
     return 0;
   }
 
