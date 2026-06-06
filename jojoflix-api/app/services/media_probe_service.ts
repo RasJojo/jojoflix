@@ -86,7 +86,8 @@ export async function probeMediaInfo(url: string): Promise<MediaInfoPayload> {
 
 export async function extractSubtitleTrackAsVtt(
   url: string,
-  trackIndex: number
+  trackIndex: number,
+  signal?: AbortSignal
 ): Promise<string | null> {
   return await new Promise<string | null>((resolve, reject) => {
     const args = [
@@ -119,6 +120,14 @@ export async function extractSubtitleTrackAsVtt(
       proc.kill('SIGKILL')
       reject(new Error('subtitle export timeout'))
     }, 150_000)
+
+    if (signal) {
+      signal.addEventListener('abort', () => {
+        clearTimeout(timer)
+        proc.kill('SIGKILL')
+        resolve(null)
+      }, { once: true })
+    }
 
     proc.stdout.on('data', (chunk: Buffer) => {
       if (out.length < 1_500_000) {

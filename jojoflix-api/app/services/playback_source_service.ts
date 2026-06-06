@@ -18,7 +18,7 @@ export interface ResolvedPlaybackSource {
 export default class PlaybackSourceService {
   private readonly scoring: TorrentScoringService
   private readonly rd: RealDebridService
-  private static readonly RD_RESOLVE_TIMEOUT_MS = 8_000
+  private static readonly RD_RESOLVE_TIMEOUT_MS = 15_000
 
   constructor() {
     this.scoring = new TorrentScoringService()

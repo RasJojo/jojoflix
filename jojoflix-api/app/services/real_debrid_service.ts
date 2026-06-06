@@ -58,7 +58,37 @@ export default class RealDebridService {
     const unavailableKey = `rd:unavailable:${crypto.createHash('md5').update(cacheSeed).digest('hex')}`
 
     const cached = await this.cache.get<string>(cacheKey)
-    if (cached) return cached
+    if (cached) {
+      // Vérifier rapidement que le lien n'est pas expiré (HEAD < 3s)
+      // avant de le renvoyer — RD links expirent souvent avant le TTL de 30min.
+      try {
+        const probe = await got.head(cached, {
+          followRedirect: true,
+          retry: { limit: 0 },
+          timeout: { connect: 2_000, request: 3_000 },
+          throwHttpErrors: false,
+        })
+        if (probe.statusCode === 404 || probe.statusCode === 410 || probe.statusCode === 403) {
+          console.info(`[rd] cached link expired (${probe.statusCode}), re-resolving`)
+          await this.cache.forget(cacheKey)
+          // Fall through to fresh resolution below
+        } else {
+          return cached
+        }
+      } catch (headErr) {
+        // Distinguer erreur réseau pure (pas de réponse) des erreurs HTTP avec statusCode.
+        // Si got a un statusCode dans l'erreur, c'est une réponse HTTP : invalider le cache.
+        const httpStatus = (headErr as { response?: { statusCode?: number } })?.response?.statusCode
+        if (httpStatus === 401 || httpStatus === 403 || httpStatus === 404) {
+          console.info(`[rd] cached link expired via error (${httpStatus}), re-resolving`)
+          await this.cache.forget(cacheKey)
+          // Fall through to fresh resolution below
+        } else {
+          // Erreur réseau pure → on renvoie quand même le lien caché, le streaming controller gérera
+          return cached
+        }
+      }
+    }
     const blocked = await this.cache.get<boolean>(blockedKey)
     if (blocked) {
       throw new Error('RD_ERROR: Magnet blocked (cached 451)')
@@ -109,8 +139,8 @@ export default class RealDebridService {
         .post(`${RD_BASE_URL}/torrents/addMagnet`, {
           headers: { Authorization: `Bearer ${this.apiKey}` },
           form: { magnet },
-          retry: { limit: 0 },
-          timeout: { connect: 3_000, request: 6_000 },
+          retry: { limit: 2 },
+          timeout: { connect: 3_000, request: 10_000 },
         })
         .json<{ id: string }>()
 
@@ -130,7 +160,7 @@ export default class RealDebridService {
       headers: { Authorization: `Bearer ${this.apiKey}` },
       form: { files: 'all' },
       retry: { limit: 0 },
-      timeout: { connect: 3_000, request: 6_000 },
+      timeout: { connect: 3_000, request: 10_000 },
     })
 
     // Attendre que le torrent soit prêt (max 30s, poll toutes les 2s)
@@ -148,7 +178,7 @@ export default class RealDebridService {
         headers: { Authorization: `Bearer ${this.apiKey}` },
         form: { link: mainLink },
         retry: { limit: 0 },
-        timeout: { connect: 3_000, request: 6_000 },
+        timeout: { connect: 3_000, request: 10_000 },
       })
       .json<{ download: string }>()
 
@@ -161,7 +191,7 @@ export default class RealDebridService {
         .get(`${RD_BASE_URL}/torrents/info/${torrentId}`, {
           headers: { Authorization: `Bearer ${this.apiKey}` },
           retry: { limit: 0 },
-          timeout: { connect: 3_000, request: 5_000 },
+          timeout: { connect: 3_000, request: 8_000 },
         })
         .json<RdTorrentInfo>()
 

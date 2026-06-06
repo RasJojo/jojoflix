@@ -1,56 +1,41 @@
-import redis from '@adonisjs/redis/services/main'
+import ConvexRepository from '#services/convex_repository'
 
-/**
- * CacheWrapper — Point d'accès centralisé à Redis.
- *
- * RÈGLE : Ne jamais appeler redis.get() directement dans un service.
- * Toujours passer par CacheWrapper.
- */
 export default class CacheWrapper {
-  /**
-   * Récupère une valeur du cache ou l'hydrate via le callback.
-   */
+  private readonly repo: ConvexRepository
+
+  constructor() {
+    this.repo = new ConvexRepository()
+  }
+
   async remember<T>(key: string, ttlSeconds: number, callback: () => Promise<T>): Promise<T> {
-    const cached = await redis.get(key)
-    if (cached) {
-      return JSON.parse(cached) as T
-    }
+    const cached = await this.repo.getCacheEntry<T>(key)
+    if (cached !== null) return cached
 
     const value = await callback()
-    await redis.set(key, JSON.stringify(value), 'EX', ttlSeconds)
+    const expiresAtMs = Date.now() + ttlSeconds * 1000
+    await this.repo.setCacheEntry(key, value, expiresAtMs)
     return value
   }
 
-  /**
-   * Récupère une valeur du cache même si expirée (fallback gracieux).
-   */
   async get<T>(key: string): Promise<T | null> {
-    const cached = await redis.get(key)
-    return cached ? (JSON.parse(cached) as T) : null
+    return this.repo.getCacheEntry<T>(key)
   }
 
-  /**
-   * Stocke une valeur dans le cache.
-   */
   async set(key: string, value: unknown, ttlSeconds: number): Promise<void> {
-    await redis.set(key, JSON.stringify(value), 'EX', ttlSeconds)
+    const expiresAtMs = Date.now() + ttlSeconds * 1000
+    await this.repo.setCacheEntry(key, value, expiresAtMs)
   }
 
-  /**
-   * Invalide une clé du cache.
-   */
   async forget(key: string): Promise<void> {
-    await redis.del(key)
+    await this.repo.deleteCacheEntry(key)
   }
 }
 
-// TTL constants
 export const CACHE_TTL = {
-  TMDB_METADATA: 3600, // 1h
-  TMDB_SEARCH: 1800, // 30min
-  TORRENTIO: 1800, // 30min
-  SUBTITLES: 86400, // 24h
-  MARKERS: 604800, // 7j
-  RD_LINK: 7200, // 2h
+  TMDB_METADATA: 3600,
+  TMDB_SEARCH: 1800,
+  TORRENTIO: 1800,
+  SUBTITLES: 86400,
+  MARKERS: 604800,
+  RD_LINK: 1800,
 } as const
-// Cache
