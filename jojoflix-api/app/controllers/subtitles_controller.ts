@@ -27,6 +27,12 @@ export default class SubtitlesController {
    */
   async list(ctx: HttpContext) {
     const { params, request, response } = ctx
+    const userId = await this.resolveUserId(ctx)
+    if (!userId) {
+      return response.unauthorized({
+        error: { code: 'AUTH_INVALID', message: 'Non authentifié', status: 401 },
+      })
+    }
     const tmdbId = params.tmdb_id as string
     const season = request.qs().season ? Number(request.qs().season) : undefined
     const episode = request.qs().episode ? Number(request.qs().episode) : undefined
@@ -214,6 +220,11 @@ export default class SubtitlesController {
       } else if (fileId.startsWith('subsource:html:')) {
         // ── SubSource download ──────────────────────────────────────────────
         const detailPath = fileId.slice('subsource:html:'.length)
+        if (!/^[a-zA-Z0-9/_-]+$/.test(detailPath)) {
+          return response.badRequest({
+            error: { code: 'INVALID_SUBTITLE_PATH', message: 'Chemin de sous-titre invalide', status: 400 },
+          })
+        }
         const flareSolverrUrl = this.resolveFlareSolverrUrl()
         const subsource = new SubsourceService(env.get('SUBSOURCE_API_KEY') ?? '', flareSolverrUrl)
         const downloadUrl = await subsource.getDownloadUrl(detailPath)
@@ -240,6 +251,10 @@ export default class SubtitlesController {
         vttContent = await this.fetchNormalizedVtt(result.url)
       }
 
+      // Valider le contenu VTT avant de mettre en cache pour éviter de cacher un VTT vide/corrompu
+      if (!vttContent || !vttContent.trimStart().startsWith('WEBVTT')) {
+        throw new Error('Invalid or empty VTT content')
+      }
       await cache.set(`vtt:raw:${proxyId}`, vttContent, CACHE_TTL.SUBTITLES)
       const token = this.extractAccessTokenFromRequest(request)
       const proxyUrl = token
@@ -250,6 +265,8 @@ export default class SubtitlesController {
     } catch (error) {
       const upstreamStatus = this.extractUpstreamStatus(error)
       const isRateLimit = upstreamStatus === 429
+      // Purger le cache en cas d'échec pour éviter de conserver un VTT vide ou corrompu
+      await new CacheWrapper().forget(`vtt:raw:${crypto.createHash('md5').update(`${fileId}:${String(language || 'und').toLowerCase().replace(/[^a-z0-9-]/g, '')}`).digest('hex')}`).catch(() => {})
       logger.warn(
         {
           fileId,
@@ -372,7 +389,7 @@ export default class SubtitlesController {
 
   private normalizeEmbeddedLanguage(track: SubtitleTrackInfoPayload): string {
     const raw = `${track.language ?? ''} ${track.title ?? ''}`.trim().toLowerCase()
-    if (/\b(fr|fra|fre|french|français|francais|vostfr|truefrench|vff|vfq)\b/.test(raw)) {
+    if (/\b(fr|fra|fre|french|français|francais|vostfr|truefrench|vff|vfq|vfi|vfb|vfs)\b/.test(raw) || /\bvo[-_]?fr\b/.test(raw) || /\bfr[-_]fr\b/.test(raw)) {
       return 'fr'
     }
     if (/\b(en|eng|english|anglais)\b/.test(raw)) return 'en'
@@ -424,8 +441,15 @@ export default class SubtitlesController {
         .toLowerCase()
       const dataOffset = offset + 30 + fnLen + extraLen
       if (fileName.endsWith('.srt') || fileName.endsWith('.vtt')) {
+        if (dataOffset + compressedSize > buf.length) {
+          throw new Error('ZIP entry out of bounds — buffer truncated or corrupt')
+        }
         const slice = buf.slice(dataOffset, dataOffset + compressedSize)
         return compression === 8 ? inflateRawSync(slice).toString('utf-8') : slice.toString('utf-8')
+      }
+      if (dataOffset + compressedSize > buf.length) {
+        offset++ // skip corrupt entry gracefully
+        continue
       }
       offset = dataOffset + compressedSize
     }
@@ -493,7 +517,14 @@ export default class SubtitlesController {
     return response.ok(vttContent)
   }
 
-  async markers({ params, response }: HttpContext) {
+  async markers(ctx: HttpContext) {
+    const { params, response } = ctx
+    const userId = await this.resolveUserId(ctx)
+    if (!userId) {
+      return response.unauthorized({
+        error: { code: 'AUTH_INVALID', message: 'Non authentifié', status: 401 },
+      })
+    }
     const tmdbId = params.tmdb_id as string
 
     const cache = new CacheWrapper()
@@ -629,12 +660,28 @@ export default class SubtitlesController {
   }
 
   private async fetchNormalizedVtt(subtitleUrl: string): Promise<string> {
-    const rawBuffer = await got
-      .get(subtitleUrl, {
+    const MAX_SUBTITLE_BYTES = 5_000_000 // 5 MB — largement suffisant pour un VTT, protège contre les OOM
+    const chunks: Buffer[] = []
+    let totalBytes = 0
+
+    await new Promise<void>((resolve, reject) => {
+      const stream = got.stream(subtitleUrl, {
         timeout: { request: 12000 },
         retry: { limit: 0 },
       })
-      .buffer()
+      stream.on('data', (chunk: Buffer) => {
+        totalBytes += chunk.length
+        if (totalBytes > MAX_SUBTITLE_BYTES) {
+          stream.destroy(new Error(`Subtitle response exceeds ${MAX_SUBTITLE_BYTES} bytes`))
+          return
+        }
+        chunks.push(chunk)
+      })
+      stream.on('end', resolve)
+      stream.on('error', reject)
+    })
+
+    const rawBuffer = Buffer.concat(chunks)
 
     let text: string
     try {

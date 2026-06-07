@@ -2,19 +2,12 @@ import type { HttpContext } from '@adonisjs/core/http'
 import TorrentScoringService, { type TorrentSource } from '#services/torrent_scoring_service'
 import RealDebridService from '#services/real_debrid_service'
 import StreamRegistry from '#services/stream_registry'
-import CacheWrapper, { CACHE_TTL } from '#services/cache_wrapper'
-import {
-  probeMediaInfo,
-  extractSubtitleTrackAsVtt,
-  isTextSubtitleCodec,
-} from '#services/media_probe_service'
 import { auth as betterAuth } from '#services/better_auth'
 import crypto from 'node:crypto'
 import got from 'got'
 import { pipeline } from 'node:stream/promises'
 import { SocksProxyAgent } from 'socks-proxy-agent'
 import env from '#start/env'
-import logger from '@adonisjs/core/services/logger'
 
 export default class StreamingController {
   private readonly scoring: TorrentScoringService
@@ -452,11 +445,16 @@ export default class StreamingController {
     requestedSourceKey: string,
     selectedSourceKey: string
   ): Promise<boolean> {
-    // 1. Invalider l'ancien flux et enregistrer le nouveau
-    const streamId = crypto.randomUUID()
-    await this.registry.register(userId, streamId)
+    // 1. Invalider l'ancien flux de façon atomique (sans URL) pour que
+    //    getActiveUrl() retourne null pendant la fenêtre de résolution.
+    await this.registry.invalidate(userId)
 
-    // 2. Vérifier que ce flux est toujours actif (pas invalidé entre-temps)
+    // 2. Générer le streamId et enregistrer en une seule étape atomique avec l'URL directe.
+    //    De cette façon, getActiveUrl() ne peut jamais retourner null entre le register et l'URL.
+    const streamId = crypto.randomUUID()
+    await this.registry.register(userId, streamId, directUrl)
+
+    // 3. Vérifier que ce flux est toujours actif (pas invalidé entre-temps par un appel concurrent)
     const activeStreamId = await this.registry.getActive(userId)
     if (activeStreamId !== streamId) {
       response.status(499).json({
@@ -468,13 +466,6 @@ export default class StreamingController {
       })
       return true // réponse envoyée, ne pas tenter d'autre source
     }
-
-    // 3. Stocker l'URL directe pour le transcoding (sélection piste audio)
-    await this.registry.register(userId, streamId, directUrl)
-
-    // Pré-extraire les sous-titres embarqués en arrière-plan dès que le stream est connu.
-    // Les VTT sont mis en cache Redis ; le sélecteur de sous-titres les sert instantanément.
-    this.scheduleEmbeddedSubtitleExtraction(directUrl).catch(() => {})
 
     // 4. Stream proxy (Range + backpressure) : on ne renvoie jamais l'URL RD au client.
     const rangeHeader = request.header('range')
@@ -597,73 +588,20 @@ export default class StreamingController {
       })
       return started
     } catch (error) {
-      if (!response.response.headersSent) {
-        response.status(502).json({
-          error: { code: 'STREAM_PROXY_FAILED', message: 'Erreur de streaming', status: 502 },
-        })
-        return true // réponse d'erreur envoyée
-      }
-      if (!response.response.writableEnded) {
-        response.response.end()
+      try {
+        if (!response.response.headersSent) {
+          response.status(502).json({
+            error: { code: 'STREAM_PROXY_FAILED', message: 'Erreur de streaming', status: 502 },
+          })
+          return true // réponse d'erreur envoyée
+        }
+        if (!response.response.writableEnded) {
+          response.response.end()
+        }
+      } catch {
+        // Headers already sent — absorb the exception silently
       }
       return true // stream déjà commencé
     }
-  }
-
-  /**
-   * Probe le fichier et extrait tous les sous-titres textuels en arrière-plan.
-   * Les VTT sont mis en cache Redis avec la même clé que download() utilise,
-   * ce qui rend la sélection instantanée pour l'utilisateur.
-   */
-  private async scheduleEmbeddedSubtitleExtraction(directUrl: string): Promise<void> {
-    const fingerprint = crypto.createHash('sha256').update(directUrl).digest('hex').slice(0, 16)
-    const cacheKey = `probe:embedded:${fingerprint}`
-    const cache = new CacheWrapper()
-
-    // Éviter de re-prober si déjà fait pour cette URL
-    const alreadyProbed = await cache.get<boolean>(cacheKey)
-    if (alreadyProbed) return
-
-    let info
-    try {
-      info = await probeMediaInfo(directUrl)
-    } catch (err) {
-      logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'Background probe failed')
-      return
-    }
-
-    const textTracks = info.subtitle_tracks.filter((t) => isTextSubtitleCodec(t.codec))
-    if (textTracks.length === 0) return
-
-    logger.info({ count: textTracks.length, fingerprint }, 'Background embedded subtitle extraction started')
-
-    // Marquer comme probé avant l'extraction (longue) pour ne pas relancer en parallèle
-    await cache.set(cacheKey, true, CACHE_TTL.SUBTITLES)
-
-    // Extraire toutes les pistes en parallèle — fire-and-forget depuis l'appelant
-    await Promise.allSettled(
-      textTracks.map(async (track) => {
-        const fileId = `embedded:${fingerprint}:${track.index}`
-        const lang = String(track.language ?? 'und').toLowerCase().replace(/[^a-z0-9-]/g, '') || 'und'
-        const proxyId = crypto.createHash('md5').update(`${fileId}:${lang}`).digest('hex')
-        const vttCacheKey = `vtt:raw:${proxyId}`
-
-        const existing = await cache.get<string>(vttCacheKey)
-        if (existing) return
-
-        try {
-          const vtt = await extractSubtitleTrackAsVtt(directUrl, track.index)
-          if (vtt) {
-            await cache.set(vttCacheKey, vtt, CACHE_TTL.SUBTITLES)
-            logger.info({ fingerprint, trackIndex: track.index, lang }, 'Embedded subtitle cached')
-          }
-        } catch (err) {
-          logger.warn(
-            { err: err instanceof Error ? err.message : String(err), trackIndex: track.index },
-            'Background subtitle extraction failed'
-          )
-        }
-      })
-    )
   }
 }

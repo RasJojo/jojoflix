@@ -1,39 +1,33 @@
 import type { HttpContext } from '@adonisjs/core/http'
 import RecommendationService from '#services/recommendation_service'
 import TmdbService from '#services/tmdb_service'
-import WatchHistory from '#models/watch_history'
-import Profile from '#models/profile'
+import ConvexRepository from '#services/convex_repository'
 
 export default class HomeController {
   private getMediaTitle(meta: { title?: string; name?: string }) {
     return meta.title ?? meta.name ?? ''
   }
 
-  async show({ auth, params, response }: HttpContext) {
-    const user = auth.getUserOrFail()
+  async show({ betterAuthUser, params, response }: HttpContext) {
+    const user = betterAuthUser!
+    const repo = new ConvexRepository()
 
-    const profile = await Profile.query()
-      .where('id', params.profile_id)
-      .where('user_id', user.id)
-      .firstOrFail()
+    const profile = await repo.getProfileOfUser(params.profile_id, user.id)
+    if (!profile) {
+      return response.notFound({
+        error: { code: 'NOT_FOUND', message: 'Profil introuvable', status: 404 },
+      })
+    }
 
     const tmdb = new TmdbService()
     const recommendationService = new RecommendationService()
-    const rows = await recommendationService.generateHomeRows(profile.id)
+    const rows = await recommendationService.generateHomeRows(profile._id)
     const watchlistEntries = Array.isArray(profile.preferences?.watchlist)
       ? profile.preferences.watchlist
       : []
 
-    const continueWatchingRaw = await WatchHistory.query()
-      .where('profile_id', profile.id)
-      .where('is_finished', false)
-      .where('current_time', '>', 0)
-      .orderBy('updated_at', 'desc')
-      .limit(100)
+    const continueWatchingRaw = await repo.getActiveWatchHistory(profile._id)
 
-    // Une seule entrée par œuvre dans "Continuer à regarder".
-    // Le tri par updated_at DESC garantit que la première occurrence
-    // correspond au dernier épisode/film consulté.
     const seenWorks = new Set<string>()
     const continueWatching = continueWatchingRaw
       .filter((h) => {
@@ -44,7 +38,6 @@ export default class HomeController {
       })
       .slice(0, 20)
 
-    // Enrichir avec les métadonnées TMDB (titre, poster, backdrop)
     const enrichedContinue = await Promise.all(
       continueWatching.map(async (h) => {
         try {
@@ -108,13 +101,7 @@ export default class HomeController {
         ? [{ type: 'continue_watching', title: 'Continuer de regarder', items: continueItems }]
         : []),
       ...(watchlistItems.length > 0
-        ? [
-            {
-              type: 'watchlist',
-              title: 'Ma liste',
-              items: watchlistItems,
-            },
-          ]
+        ? [{ type: 'watchlist', title: 'Ma liste', items: watchlistItems }]
         : []),
       ...rows,
     ]
@@ -122,9 +109,7 @@ export default class HomeController {
     return response.ok({ data: { rows: allRows } })
   }
 
-  async browse({ auth, params, response }: HttpContext) {
-    auth.getUserOrFail()
-
+  async browse({ params, response }: HttpContext) {
     const mediaType = params.mediaType as 'movie' | 'tv'
     if (mediaType !== 'movie' && mediaType !== 'tv') {
       return response.badRequest({ message: 'mediaType must be movie or tv' })
@@ -167,7 +152,7 @@ export default class HomeController {
       progress: null,
     })
 
-    const rows = [
+    const browseRows = [
       {
         type: 'trending',
         title: mediaType === 'movie' ? 'Films tendance' : 'Séries tendance',
@@ -180,6 +165,6 @@ export default class HomeController {
       })),
     ]
 
-    return response.ok({ data: { rows } })
+    return response.ok({ data: { rows: browseRows } })
   }
 }

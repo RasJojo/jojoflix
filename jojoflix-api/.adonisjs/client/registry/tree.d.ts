@@ -18,6 +18,7 @@ export interface ApiDefinition {
   }
   home: {
     show: typeof routes['home.show']
+    browse: typeof routes['home.browse']
   }
   streaming: {
     movieSources: typeof routes['streaming.movie_sources']
@@ -37,9 +38,25 @@ export interface ApiDefinition {
     show: typeof routes['media.show']
     search: typeof routes['media.search']
   }
+  people: {
+    show: typeof routes['people.show']
+  }
+  watchlist: {
+    index: typeof routes['watchlist.index']
+    store: typeof routes['watchlist.store']
+    destroy: typeof routes['watchlist.destroy']
+  }
   transcode: {
+    info: typeof routes['transcode.info']
     tracks: typeof routes['transcode.tracks']
+    subtitle: typeof routes['transcode.subtitle']
     audio: typeof routes['transcode.audio']
+  }
+  download: {
+    movie: typeof routes['download.movie']
+    tvEpisode: typeof routes['download.tv_episode']
+    streamMovie: typeof routes['download.stream_movie']
+    streamTvEpisode: typeof routes['download.stream_tv_episode']
   }
   progress: {
     show: typeof routes['progress.show']
