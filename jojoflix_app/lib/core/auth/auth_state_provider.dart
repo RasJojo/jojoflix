@@ -10,7 +10,7 @@ part 'auth_state_provider.g.dart';
 bool authState(Ref ref) {
   final prefs = ref.watch(sharedPreferencesProvider);
   final token = prefs.getString('auth_token');
-  return token != null && token.isNotEmpty;
+  return token != null && token.isNotEmpty && !isLegacyAuthToken(token);
 }
 
 /// Permet d'invalider l'état d'auth depuis n'importe quel endroit

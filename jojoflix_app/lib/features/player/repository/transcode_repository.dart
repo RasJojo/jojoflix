@@ -183,7 +183,7 @@ class TranscodeRepository {
   Future<String> getSubtitleTrackVtt(
     int trackIndex, {
     String? streamId,
-    Duration timeout = const Duration(seconds: 60),
+    Duration timeout = const Duration(seconds: 160),
   }) async {
     final query = <String, dynamic>{'track': trackIndex};
     if (streamId != null && streamId.isNotEmpty) {
