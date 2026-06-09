@@ -24,88 +24,21 @@ services:
       APP_KEY: ${APP_KEY}
       APP_URL: ${APP_URL}
       SESSION_DRIVER: cookie
-      DB_HOST: db
-      DB_PORT: 5432
-      DB_USER: ${DB_USER}
-      DB_PASSWORD: ${DB_PASSWORD}
-      DB_DATABASE: ${DB_DATABASE}
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      DB_PATH: /data/jojoflix.sqlite
+      CONVEX_URL: ${CONVEX_URL}
+      CONVEX_ADMIN_KEY: ${CONVEX_ADMIN_KEY}
       RD_API_KEY: ${RD_API_KEY}
       TMDB_API_KEY: ${TMDB_API_KEY}
       OPENSUBS_API_KEY: ${OPENSUBS_API_KEY}
-      MEDIAFUSION_URL: ${MEDIAFUSION_URL}
-      TORRENTIO_URL: ${TORRENTIO_URL:-https://torrentio.strem.fun}
-      DRAMAYO_URL: ${DRAMAYO_URL:-}
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-
-  migrator:
-    build:
-      context: ./jojoflix-api
-      dockerfile: Dockerfile
-    command: node ace migration:run --force
-    environment:
-      NODE_ENV: production
-      PORT: 3333
-      HOST: 0.0.0.0
-      APP_KEY: ${APP_KEY}
-      APP_URL: ${APP_URL:-http://localhost}
-      SESSION_DRIVER: cookie
-      LOG_LEVEL: info
-      DB_HOST: db
-      DB_PORT: 5432
-      DB_USER: ${DB_USER}
-      DB_PASSWORD: ${DB_PASSWORD}
-      DB_DATABASE: ${DB_DATABASE}
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
-      RD_API_KEY: ${RD_API_KEY:-placeholder}
-      TMDB_API_KEY: ${TMDB_API_KEY:-placeholder}
-      OPENSUBS_API_KEY: ${OPENSUBS_API_KEY:-placeholder}
+      SUBDL_API_KEY: ${SUBDL_API_KEY:-}
+      FLARESOLVERR_URL: ${FLARESOLVERR_URL:-}
       MEDIAFUSION_URL: ${MEDIAFUSION_URL:-}
       TORRENTIO_URL: ${TORRENTIO_URL:-https://torrentio.strem.fun}
+      TORRENTIO_PROXY: ${TORRENTIO_PROXY:-}
       DRAMAYO_URL: ${DRAMAYO_URL:-}
-    depends_on:
-      db:
-        condition: service_healthy
-    restart: "no"
-
-  db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_DB: ${DB_DATABASE}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_DATABASE}"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-    restart: unless-stopped
-
-  redis:
-    image: redis:7-alpine
-    command: >
-      redis-server
-      --appendonly yes
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+      - sqlite_data:/data
     restart: unless-stopped
 
 volumes:
-  postgres_data:
-  redis_data:
+  sqlite_data:

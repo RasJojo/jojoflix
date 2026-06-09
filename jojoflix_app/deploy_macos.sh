@@ -32,7 +32,7 @@ codesign --force --deep --sign - "$APP_BUILD"
 
 echo "=== Déploiement dans /Applications ==="
 rm -rf "$APP_DEST"
-cp -r "$APP_BUILD" "$APP_DEST"
+ditto "$APP_BUILD" "$APP_DEST"
 
 echo "=== Lancement ==="
 pkill -f "jojoflix_app" 2>/dev/null || true

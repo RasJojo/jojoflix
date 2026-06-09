@@ -10,7 +10,7 @@ ProfileRepository profileRepository(Ref ref) {
 }
 
 class ProfileModel {
-  final int id;
+  final String id;
   final String name;
   final String? avatarUrl;
   final bool isKids;
@@ -26,7 +26,7 @@ class ProfileModel {
 
   factory ProfileModel.fromJson(Map<String, dynamic> json) {
     return ProfileModel(
-      id: json['id'] as int,
+      id: json['id'].toString(),
       name: json['name'] as String,
       avatarUrl: json['avatar_url'] as String?,
       isKids: json['is_kids'] as bool? ?? false,
@@ -53,14 +53,14 @@ class ProfileRepository {
     return ProfileModel.fromJson(response.data['data'] as Map<String, dynamic>);
   }
 
-  Future<Map<String, dynamic>> selectProfile(int profileId) async {
+  Future<Map<String, dynamic>> selectProfile(String profileId) async {
     final response = await apiClient.dio.post('/api/profiles/$profileId/select');
     final data = response.data['data'] as Map<String, dynamic>;
-    await apiClient.saveProfileId(profileId.toString());
+    await apiClient.saveProfileId(profileId);
     return data;
   }
 
-  Future<void> updatePreferences(int profileId, Map<String, dynamic> preferences) async {
+  Future<void> updatePreferences(String profileId, Map<String, dynamic> preferences) async {
     await apiClient.dio.put('/api/profiles/$profileId', data: {
       'preferences': preferences,
     });
