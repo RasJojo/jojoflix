@@ -186,6 +186,10 @@ async function runFfprobe(url: string): Promise<any> {
     ]
     const proc = spawn('ffprobe', args)
     let out = ''
+    // BUG #8 fix: guard against double-reject when the size-limit kill path fires.
+    // The 'close' event always fires after kill(), so without this flag the promise
+    // would reject twice — once from the data handler, once from the close handler.
+    let rejected = false
     const MAX_PROBE_OUTPUT = 10_000_000 // 10 MB — guard against OOM on complex files
     const timer = setTimeout(() => {
       proc.kill('SIGKILL')
@@ -193,6 +197,8 @@ async function runFfprobe(url: string): Promise<any> {
     }, 8_000)
     proc.stdout.on('data', (d: Buffer) => {
       if (out.length >= MAX_PROBE_OUTPUT) {
+        rejected = true
+        clearTimeout(timer)
         proc.kill('SIGKILL')
         reject(new Error('ffprobe output exceeded size limit'))
         return
@@ -200,6 +206,8 @@ async function runFfprobe(url: string): Promise<any> {
       out += d.toString()
     })
     proc.on('close', (code) => {
+      // BUG #8 fix: skip if already rejected via the size-limit branch above.
+      if (rejected) return
       clearTimeout(timer)
       if (code !== 0 || !out) return reject(new Error('ffprobe failed'))
       try {
@@ -209,6 +217,7 @@ async function runFfprobe(url: string): Promise<any> {
       }
     })
     proc.on('error', (error) => {
+      if (rejected) return
       clearTimeout(timer)
       reject(error)
     })

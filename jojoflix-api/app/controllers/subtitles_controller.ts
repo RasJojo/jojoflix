@@ -274,8 +274,13 @@ export default class SubtitlesController {
     } catch (error) {
       const upstreamStatus = this.extractUpstreamStatus(error)
       const isRateLimit = upstreamStatus === 429
-      // Purger le cache en cas d'échec pour éviter de conserver un VTT vide ou corrompu
-      await new CacheWrapper().forget(`vtt:raw:${crypto.createHash('md5').update(`${fileId}:${String(language || 'und').toLowerCase().replace(/[^a-z0-9-]/g, '')}`).digest('hex')}`).catch(() => {})
+      // Purger le cache en cas d'échec pour éviter de conserver un VTT vide ou corrompu.
+      // BUG #3 fix: also purge vtt:owner so the user can retry instead of being stuck
+      // with a 403/404 for the full TTL duration.
+      const failedProxyId = crypto.createHash('md5').update(`${fileId}:${String(language || 'und').toLowerCase().replace(/[^a-z0-9-]/g, '')}`).digest('hex')
+      await new CacheWrapper().forget(`vtt:raw:${failedProxyId}`).catch(() => {})
+      await new CacheWrapper().forget(`vtt:owner:${failedProxyId}`).catch(() => {})
+      await new CacheWrapper().forget(`vtt:url:${failedProxyId}`).catch(() => {})
       logger.warn(
         {
           fileId,
@@ -362,7 +367,8 @@ export default class SubtitlesController {
   private parseEmbeddedSubtitleFileId(
     fileId: string
   ): { fingerprint: string; trackIndex: number } | null {
-    const match = fileId.match(/^embedded:([a-f0-9]{16}):(\d+)$/i)
+    // BUG #4 fix: fingerprint is always lowercase hex — drop the i flag to avoid widening attack surface.
+    const match = fileId.match(/^embedded:([a-f0-9]{16}):(\d+)$/)
     if (!match) return null
 
     const MAX_EMBEDDED_TRACK_INDEX = 100
@@ -564,12 +570,47 @@ export default class SubtitlesController {
     return response.ok({ data: markers })
   }
 
-  async storeMarker({ request, response }: HttpContext) {
+  async storeMarker(ctx: HttpContext) {
+    const { request, response } = ctx
+
+    // BUG #10 fix: storeMarker was completely unauthenticated — add the same auth check
+    // used by all other methods in this controller.
+    const userId = await this.resolveUserId(ctx)
+    if (!userId) {
+      return response.unauthorized({
+        error: { code: 'AUTH_INVALID', message: 'Non authentifié', status: 401 },
+      })
+    }
+
     const body = request.body()
+
+    // BUG #11 fix: validate the incoming body before trusting it.
     const tmdbId = body.tmdb_id
     const markerType = body.marker_type
     const startTime = body.start_time
     const endTime = body.end_time
+
+    if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
+      return response.badRequest({
+        error: { code: 'INVALID_TMDB_ID', message: 'tmdb_id doit être un entier positif', status: 400 },
+      })
+    }
+    if (markerType !== 'intro' && markerType !== 'outro') {
+      return response.badRequest({
+        error: { code: 'INVALID_MARKER_TYPE', message: "marker_type doit être 'intro' ou 'outro'", status: 400 },
+      })
+    }
+    if (typeof startTime !== 'number' || !Number.isFinite(startTime) || startTime < 0) {
+      return response.badRequest({
+        error: { code: 'INVALID_START_TIME', message: 'start_time doit être un nombre >= 0', status: 400 },
+      })
+    }
+    if (typeof endTime !== 'number' || !Number.isFinite(endTime) || endTime <= 0 || endTime <= startTime) {
+      return response.badRequest({
+        error: { code: 'INVALID_END_TIME', message: 'end_time doit être un nombre positif supérieur à start_time', status: 400 },
+      })
+    }
+
     const repo = new ConvexRepository()
     const marker = await repo.createMediaMarker({
       tmdbId,

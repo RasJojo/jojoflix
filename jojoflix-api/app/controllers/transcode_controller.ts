@@ -202,15 +202,30 @@ export default class TranscodeController {
 
     const ff = spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'ignore'] })
 
+    // BUG #1 fix: hard 4-hour deadline ensures the limiter slot is always released
+    // even when the upstream TCP connection dies silently without a clean close.
+    const killTimer = setTimeout(() => ff.kill('SIGKILL'), 4 * 60 * 60 * 1000)
+
     try {
       response.response.on('close', () => ff.kill('SIGKILL'))
       ff.stdout.pipe(response.response)
 
       await new Promise<void>((resolve) => {
-        ff.on('close', resolve)
+        ff.on('close', (code) => {
+          // BUG #2 fix: if ffmpeg exits non-zero and headers haven't been sent yet,
+          // send a 502 error to prevent silent corrupt data from reaching the client.
+          if (code !== 0 && !response.response.headersSent) {
+            response.response.writeHead(502, { 'Content-Type': 'application/json' })
+            response.response.end(JSON.stringify({
+              error: { code: 'TRANSCODE_FAILED', message: 'FFmpeg a échoué', status: 502 },
+            }))
+          }
+          resolve()
+        })
         ff.on('error', resolve)
       })
     } finally {
+      clearTimeout(killTimer)
       ffmpegLimiter.release()
     }
   }

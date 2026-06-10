@@ -465,7 +465,9 @@ export default class SubsourceService {
       const fnLen = zipBuffer.readUInt16LE(offset + 26)
       const extraLen = zipBuffer.readUInt16LE(offset + 28)
       // Validate fnLen before slicing to avoid reading garbage filename data.
-      if (fnLen <= 0 || offset + 30 + fnLen > zipBuffer.length) { offset++; continue }
+      // BUG #12 fix: advance by 30 (minimum local file header size) instead of 1
+      // to prevent O(n·len) CPU DoS when a crafted zip has many zero-length filename entries.
+      if (fnLen <= 0 || offset + 30 + fnLen > zipBuffer.length) { offset += 30; continue }
       const fileName = zipBuffer.slice(offset + 30, offset + 30 + fnLen).toString('utf-8').toLowerCase()
       const dataOffset = offset + 30 + fnLen + extraLen
 
@@ -522,10 +524,12 @@ export default class SubsourceService {
 
   private assTimeToSrt(t: string): string {
     // ASS: H:MM:SS.cs → SRT: HH:MM:SS,ms
+    // BUG #13 fix: pad m and s to 2 digits — without padding, single-digit values
+    // produce invalid SRT timestamps like "0:1:5,000" instead of "00:01:05,000".
     const [hms, cs] = t.trim().split('.')
     const [h, m, s] = hms.split(':')
     const ms = String(Number(cs ?? '0') * 10).padStart(3, '0')
-    return `${h.padStart(2, '0')}:${m}:${s},${ms}`
+    return `${h.padStart(2, '0')}:${m.padStart(2, '0')}:${s.padStart(2, '0')},${ms}`
   }
 
   // ─── Private: Utilities ──────────────────────────────────────────────────────
