@@ -2,13 +2,19 @@ import type { HttpContext } from '@adonisjs/core/http'
 import TorrentScoringService, { type TorrentSource } from '#services/torrent_scoring_service'
 import RealDebridService from '#services/real_debrid_service'
 import StreamRegistry from '#services/stream_registry'
-import User from '#models/user'
+import CacheWrapper, { CACHE_TTL } from '#services/cache_wrapper'
+import {
+  probeMediaInfo,
+  extractSubtitleTrackAsVtt,
+  isTextSubtitleCodec,
+} from '#services/media_probe_service'
+import { auth as betterAuth } from '#services/better_auth'
 import crypto from 'node:crypto'
 import got from 'got'
 import { pipeline } from 'node:stream/promises'
-import { Secret } from '@adonisjs/core/helpers'
 import { SocksProxyAgent } from 'socks-proxy-agent'
 import env from '#start/env'
+import logger from '@adonisjs/core/services/logger'
 
 export default class StreamingController {
   private readonly scoring: TorrentScoringService
@@ -24,8 +30,9 @@ export default class StreamingController {
     this.torProxyAgent = torrentioProxy ? new SocksProxyAgent(torrentioProxy) : undefined
   }
 
-  async movie({ auth, params, request, response }: HttpContext) {
-    const userId = await this.resolveUserId(auth, request)
+  async movie(ctx: HttpContext) {
+    const { params, request, response } = ctx
+    const userId = await this.resolveUserId(ctx)
     if (!userId) {
       return response.unauthorized({
         error: { code: 'AUTH_INVALID', message: 'Non authentifié', status: 401 },
@@ -55,8 +62,9 @@ export default class StreamingController {
     }
   }
 
-  async tvEpisode({ auth, params, request, response }: HttpContext) {
-    const userId = await this.resolveUserId(auth, request)
+  async tvEpisode(ctx: HttpContext) {
+    const { params, request, response } = ctx
+    const userId = await this.resolveUserId(ctx)
     if (!userId) {
       return response.unauthorized({
         error: { code: 'AUTH_INVALID', message: 'Non authentifié', status: 401 },
@@ -90,8 +98,9 @@ export default class StreamingController {
     }
   }
 
-  async prewarmTvEpisode({ auth, params, request, response }: HttpContext) {
-    const userId = await this.resolveUserId(auth, request)
+  async prewarmTvEpisode(ctx: HttpContext) {
+    const { params, request, response } = ctx
+    const userId = await this.resolveUserId(ctx)
     if (!userId) {
       return response.unauthorized({
         error: { code: 'AUTH_INVALID', message: 'Non authentifié', status: 401 },
@@ -112,27 +121,20 @@ export default class StreamingController {
   }
 
   private async resolveUserId(
-    auth: HttpContext['auth'],
-    request: HttpContext['request']
-  ): Promise<number | null> {
-    try {
-      const user = auth.getUserOrFail()
-      return user.id
-    } catch {
-      // Fallback token pour players qui ne passent pas Authorization.
-    }
+    ctx: HttpContext
+  ): Promise<string | null> {
+    if (ctx.betterAuthUser) return ctx.betterAuthUser.id
 
-    const queryToken = request.input('token') as string | undefined
+    const queryToken = ctx.request.input('token') as string | undefined
     if (!queryToken) return null
 
-    const accessToken = await User.accessTokens.verify(new Secret(queryToken))
-    if (!accessToken || accessToken.isExpired()) return null
-
-    return Number(accessToken.tokenableId)
+    const session = await betterAuth.api
+      .getSession({ headers: new Headers({ authorization: `Bearer ${queryToken}` }) })
+      .catch(() => null)
+    return session?.user.id ?? null
   }
 
-  async movieSources({ auth, params, request, response }: HttpContext) {
-    auth.getUserOrFail()
+  async movieSources({ params, request, response }: HttpContext) {
     const tmdbId = params.tmdb_id as string
     const providersMode = String(request.input('providers') ?? 'fast').toLowerCase()
     const includeSlowProviders = providersMode === 'full'
@@ -149,8 +151,7 @@ export default class StreamingController {
     }
   }
 
-  async tvSources({ auth, params, request, response }: HttpContext) {
-    auth.getUserOrFail()
+  async tvSources({ params, request, response }: HttpContext) {
     const tmdbId = params.tmdb_id as string
     const season = Number(params.season)
     const episode = Number(params.episode)
@@ -213,7 +214,7 @@ export default class StreamingController {
   }
 
   private async streamWithFallback(params: {
-    userId: number
+    userId: string
     tmdbId: string
     mediaType: 'movie' | 'tv'
     preferredSource: TorrentSource
@@ -261,7 +262,7 @@ export default class StreamingController {
   private async trySources(
     allSources: TorrentSource[],
     params: {
-      userId: number
+      userId: string
       tmdbId: string
       mediaType: 'movie' | 'tv'
       preferredSource: TorrentSource
@@ -444,7 +445,7 @@ export default class StreamingController {
   // Retourne true si le streaming a démarré (ou si une réponse d'erreur a déjà été envoyée),
   // false si l'upstream a répondu 4xx/5xx avant d'envoyer des headers → la source suivante peut être tentée.
   private async proxyStream(
-    userId: number,
+    userId: string,
     directUrl: string,
     request: HttpContext['request'],
     response: HttpContext['response'],
@@ -471,16 +472,27 @@ export default class StreamingController {
     // 3. Stocker l'URL directe pour le transcoding (sélection piste audio)
     await this.registry.register(userId, streamId, directUrl)
 
+    // Pré-extraire les sous-titres embarqués en arrière-plan dès que le stream est connu.
+    // Les VTT sont mis en cache Redis ; le sélecteur de sous-titres les sert instantanément.
+    this.scheduleEmbeddedSubtitleExtraction(directUrl).catch(() => {})
+
     // 4. Stream proxy (Range + backpressure) : on ne renvoie jamais l'URL RD au client.
     const rangeHeader = request.header('range')
     const proxyHeaders: Record<string, string> = {}
     if (rangeHeader) proxyHeaders['Range'] = rangeHeader
+    const isDramayoCdn = this.isDramayoCdnUrl(directUrl)
     // DramaYo CDN requiert un Referer pour servir les manifests HLS (sinon 403)
-    if (this.isDramayoCdnUrl(directUrl)) {
+    if (isDramayoCdn) {
       proxyHeaders['Referer'] = 'https://www.dramayo.com/'
       proxyHeaders['Origin'] = 'https://www.dramayo.com'
+      proxyHeaders['User-Agent'] = 'Mozilla/5.0 (JOJOFLIX)'
     }
+    const agentOpts =
+      isDramayoCdn && this.torProxyAgent
+        ? { agent: { https: this.torProxyAgent, http: this.torProxyAgent } }
+        : {}
     const upstream = got.stream(directUrl, {
+      ...agentOpts,
       throwHttpErrors: false,
       decompress: false,
       retry: { limit: 0 },
@@ -503,6 +515,30 @@ export default class StreamingController {
           // upstream.destroy() peut émettre 'error' de façon synchrone, ce qui appellerait
           // reject() avant resolve(), forçant le catch à envoyer un 502 au lieu de continuer.
           if (statusCode >= 400) {
+            resolve(false)
+            if (!upstream.destroyed) upstream.destroy()
+            return
+          }
+
+          // Rejeter les réponses non-vidéo : JSON, HTML, XML → mpv voit des "streams filtrés"
+          // car il tente de les parser comme container vidéo et échoue à sélectionner des pistes.
+          const contentType = (upstreamResponse.headers['content-type'] ?? '').toLowerCase()
+          const isVideoLike =
+            contentType.startsWith('video/') ||
+            contentType.startsWith('audio/') ||
+            contentType.includes('octet-stream') ||
+            contentType.includes('mpeg') ||
+            contentType === '' // Certains CDN n'envoient pas de Content-Type, on laisse passer
+          if (
+            !isVideoLike &&
+            (contentType.includes('json') ||
+              contentType.includes('html') ||
+              contentType.includes('xml') ||
+              contentType.includes('text/plain'))
+          ) {
+            console.warn(
+              `[stream:upstream] non-video content-type="${contentType}" → reject source`
+            )
             resolve(false)
             if (!upstream.destroyed) upstream.destroy()
             return
@@ -572,5 +608,62 @@ export default class StreamingController {
       }
       return true // stream déjà commencé
     }
+  }
+
+  /**
+   * Probe le fichier et extrait tous les sous-titres textuels en arrière-plan.
+   * Les VTT sont mis en cache Redis avec la même clé que download() utilise,
+   * ce qui rend la sélection instantanée pour l'utilisateur.
+   */
+  private async scheduleEmbeddedSubtitleExtraction(directUrl: string): Promise<void> {
+    const fingerprint = crypto.createHash('sha256').update(directUrl).digest('hex').slice(0, 16)
+    const cacheKey = `probe:embedded:${fingerprint}`
+    const cache = new CacheWrapper()
+
+    // Éviter de re-prober si déjà fait pour cette URL
+    const alreadyProbed = await cache.get<boolean>(cacheKey)
+    if (alreadyProbed) return
+
+    let info
+    try {
+      info = await probeMediaInfo(directUrl)
+    } catch (err) {
+      logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'Background probe failed')
+      return
+    }
+
+    const textTracks = info.subtitle_tracks.filter((t) => isTextSubtitleCodec(t.codec))
+    if (textTracks.length === 0) return
+
+    logger.info({ count: textTracks.length, fingerprint }, 'Background embedded subtitle extraction started')
+
+    // Marquer comme probé avant l'extraction (longue) pour ne pas relancer en parallèle
+    await cache.set(cacheKey, true, CACHE_TTL.SUBTITLES)
+
+    // Extraire toutes les pistes en parallèle — fire-and-forget depuis l'appelant
+    await Promise.allSettled(
+      textTracks.map(async (track) => {
+        const fileId = `embedded:${fingerprint}:${track.index}`
+        const lang = String(track.language ?? 'und').toLowerCase().replace(/[^a-z0-9-]/g, '') || 'und'
+        const proxyId = crypto.createHash('md5').update(`${fileId}:${lang}`).digest('hex')
+        const vttCacheKey = `vtt:raw:${proxyId}`
+
+        const existing = await cache.get<string>(vttCacheKey)
+        if (existing) return
+
+        try {
+          const vtt = await extractSubtitleTrackAsVtt(directUrl, track.index)
+          if (vtt) {
+            await cache.set(vttCacheKey, vtt, CACHE_TTL.SUBTITLES)
+            logger.info({ fingerprint, trackIndex: track.index, lang }, 'Embedded subtitle cached')
+          }
+        } catch (err) {
+          logger.warn(
+            { err: err instanceof Error ? err.message : String(err), trackIndex: track.index },
+            'Background subtitle extraction failed'
+          )
+        }
+      })
+    )
   }
 }

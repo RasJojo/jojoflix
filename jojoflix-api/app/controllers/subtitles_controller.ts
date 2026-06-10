@@ -276,9 +276,18 @@ export default class SubtitlesController {
     if (!directUrl) return []
 
     try {
-      const info = await probeMediaInfo(directUrl)
       const fingerprint = this.streamFingerprint(directUrl)
-      const embedded = info.subtitle_tracks
+      const cache = new CacheWrapper()
+      const probeCacheKey = `probe:tracks:${fingerprint}`
+
+      let subtitleTracks: SubtitleTrackInfoPayload[] | null = await cache.get<SubtitleTrackInfoPayload[]>(probeCacheKey)
+      if (!subtitleTracks) {
+        const info = await probeMediaInfo(directUrl)
+        subtitleTracks = info.subtitle_tracks
+        await cache.set(probeCacheKey, subtitleTracks, CACHE_TTL.SUBTITLES)
+      }
+
+      const embedded = subtitleTracks
         .filter((track) => isTextSubtitleCodec(track.codec))
         .map((track) => ({
           file_id: `embedded:${fingerprint}:${track.index}`,
@@ -289,14 +298,14 @@ export default class SubtitlesController {
 
       if (embedded.length > 0) {
         logger.info(
-          { count: embedded.length, totalTracks: info.subtitle_tracks.length },
+          { count: embedded.length, totalTracks: subtitleTracks.length },
           'Subtitles from embedded active stream'
         )
-      } else if (info.subtitle_tracks.length > 0) {
+      } else if (subtitleTracks.length > 0) {
         logger.warn(
           {
-            totalTracks: info.subtitle_tracks.length,
-            codecs: info.subtitle_tracks.map((track) => track.codec),
+            totalTracks: subtitleTracks.length,
+            codecs: subtitleTracks.map((track) => track.codec),
           },
           'Embedded subtitle tracks are not text-extractable'
         )
