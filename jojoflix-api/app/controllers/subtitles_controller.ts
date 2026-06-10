@@ -245,9 +245,13 @@ export default class SubtitlesController {
         const subdlKey = env.get('SUBDL_API_KEY') ?? ''
         const subdl = new SubdlService(subdlKey)
         const zipUrl = await subdl.getDownloadUrl(subdlPath)
+        const MAX_ZIP_BYTES = 5_000_000
         const zipBuffer = await got
           .get(zipUrl, { timeout: { request: 30_000 }, retry: { limit: 0 } })
           .buffer()
+        if (zipBuffer.length > MAX_ZIP_BYTES) {
+          throw new Error(`SubDL zip too large: ${zipBuffer.length} bytes`)
+        }
         const { inflateRawSync } = await import('node:zlib')
         // basic zip extraction — find first .srt
         const srtContent = this.extractFromZipBuffer(zipBuffer, inflateRawSync)
@@ -613,7 +617,7 @@ export default class SubtitlesController {
 
     const repo = new ConvexRepository()
     const marker = await repo.createMediaMarker({
-      tmdbId,
+      tmdbId: String(tmdbId),
       markerType,
       startTime,
       endTime,

@@ -99,7 +99,8 @@ export default class SubsourceService {
 
   async getDownloadUrl(detailPath: string, { forceRefresh = false } = {}): Promise<string> {
     const subId = this.extractSubId(detailPath)
-    if (this.apiKey && subId) return `subsource-api:${subId}`
+    // Skip the fast-path on forceRefresh so retries can fall through to FlareSolverr scraping.
+    if (this.apiKey && subId && !forceRefresh) return `subsource-api:${subId}`
 
     const cacheKey = `subsource:v2:dl:${detailPath}`
     if (!forceRefresh) {
@@ -471,9 +472,15 @@ export default class SubsourceService {
       const fileName = zipBuffer.slice(offset + 30, offset + 30 + fnLen).toString('utf-8').toLowerCase()
       const dataOffset = offset + 30 + fnLen + extraLen
 
+      // When a non-matching entry is OOB, skip forward past its header instead of
+      // jumping to dataOffset+compressedSize (which could be past the buffer end,
+      // silently skipping all remaining valid entries).
+      if (dataOffset + compressedSize > zipBuffer.length) {
+        offset = dataOffset
+        continue
+      }
+
       if (SUPPORTED.some((ext) => fileName.endsWith(ext))) {
-        // Validate data bounds before slicing to avoid OOB reads on corrupt zips.
-        if (dataOffset + compressedSize > zipBuffer.length) { offset = dataOffset + compressedSize; continue }
         const raw = zipBuffer.slice(dataOffset, dataOffset + compressedSize)
         const data = compression === 8 ? inflateRawSync(raw) : raw
         candidates.push({ name: fileName, data })

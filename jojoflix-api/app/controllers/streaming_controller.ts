@@ -118,11 +118,20 @@ export default class StreamingController {
   ): Promise<string | null> {
     if (ctx.betterAuthUser) return ctx.betterAuthUser.id
 
-    const queryToken = ctx.request.input('token') as string | undefined
-    if (!queryToken) return null
+    const authHeader = ctx.request.header('authorization') ?? ctx.request.header('Authorization')
+    let token: string | null = null
+    if (authHeader) {
+      const match = authHeader.match(/^Bearer\s+(.+)$/i)
+      if (match?.[1]) token = match[1].trim()
+    }
+    if (!token) {
+      const queryToken = ctx.request.input('token') as string | undefined
+      token = queryToken && queryToken.trim().length > 0 ? queryToken.trim() : null
+    }
+    if (!token) return null
 
     const session = await betterAuth.api
-      .getSession({ headers: new Headers({ authorization: `Bearer ${queryToken}` }) })
+      .getSession({ headers: new Headers({ authorization: `Bearer ${token}` }) })
       .catch(() => null)
     return session?.user.id ?? null
   }
@@ -585,7 +594,12 @@ export default class StreamingController {
             response.header('accept-ranges', 'bytes')
           }
 
-          pipeline(upstream, response.response).then(() => resolve(true)).catch(reject)
+          pipeline(upstream, response.response)
+            .then(() => {
+              response.response.removeListener('close', cleanupListener)
+              resolve(true)
+            })
+            .catch(reject)
         })
 
         upstream.once('error', reject)
@@ -605,6 +619,7 @@ export default class StreamingController {
         if (!response.response.writableEnded) {
           response.response.end()
         }
+        response.response.removeListener('close', cleanupListener)
       } catch {
         // Headers already sent — absorb the exception silently
       }

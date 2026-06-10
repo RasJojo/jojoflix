@@ -158,13 +158,24 @@ export default class RealDebridService {
     options: UnrestrictOptions = {},
     maxAttempts = 15
   ): Promise<string> {
-    // Sélectionner tous les fichiers du torrent
-    await got.post(`${RD_BASE_URL}/torrents/selectFiles/${torrentId}`, {
-      headers: { Authorization: `Bearer ${this.apiKey}` },
-      form: { files: 'all' },
-      retry: { limit: 0 },
-      timeout: { connect: 3_000, request: 10_000 },
-    })
+    // Sélectionner tous les fichiers du torrent — retry 2x on transient network errors
+    // to avoid leaving the torrent un-selected (orphaned) in the RD account.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await got.post(`${RD_BASE_URL}/torrents/selectFiles/${torrentId}`, {
+          headers: { Authorization: `Bearer ${this.apiKey}` },
+          form: { files: 'all' },
+          retry: { limit: 0 },
+          timeout: { connect: 3_000, request: 10_000 },
+        })
+        break
+      } catch (err) {
+        const status = (err as { response?: { statusCode?: number } })?.response?.statusCode
+        if (status === 401 || status === 403) throw err
+        if (attempt === 2) throw err
+        await new Promise((resolve) => setTimeout(resolve, 1_000))
+      }
+    }
 
     // Attendre que le torrent soit prêt (max 30s, poll toutes les 2s)
     const info = await this.pollTorrentReady(torrentId, maxAttempts)
