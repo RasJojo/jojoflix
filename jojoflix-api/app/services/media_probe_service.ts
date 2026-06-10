@@ -91,6 +91,12 @@ export async function extractSubtitleTrackAsVtt(
   return await new Promise<string | null>((resolve, reject) => {
     const args = [
       '-nostdin',
+      '-reconnect',
+      '1',
+      '-reconnect_streamed',
+      '1',
+      '-reconnect_delay_max',
+      '5',
       '-analyzeduration',
       '2500000',
       '-probesize',
