@@ -60,7 +60,12 @@ export default class SubdlService {
       })
       .json<{ status: boolean; subtitles?: SubdlApiSubtitle[] }>()
 
-    if (!data.status || !data.subtitles?.length) return []
+    if (!data.status || !data.subtitles?.length) {
+      // Cache negative results with a shorter TTL so repeated requests for
+      // titles with no subtitles don't hammer the SubDL API quota.
+      await this.cache.set(cacheKey, [], Math.floor(CACHE_TTL.SUBTITLES / 4))
+      return []
+    }
 
     const entries: SubdlEntry[] = []
     const seen = new Set<string>()
@@ -84,9 +89,7 @@ export default class SubdlService {
       })
     }
 
-    if (entries.length > 0) {
-      await this.cache.set(cacheKey, entries, CACHE_TTL.SUBTITLES)
-    }
+    await this.cache.set(cacheKey, entries, CACHE_TTL.SUBTITLES)
     return entries
   }
 
