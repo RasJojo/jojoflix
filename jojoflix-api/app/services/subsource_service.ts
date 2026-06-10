@@ -534,7 +534,9 @@ export default class SubsourceService {
     // BUG #13 fix: pad m and s to 2 digits — without padding, single-digit values
     // produce invalid SRT timestamps like "0:1:5,000" instead of "00:01:05,000".
     const [hms, cs] = t.trim().split('.')
-    const [h, m, s] = hms.split(':')
+    // Destructuring defaults guard against malformed timestamps (e.g. "1:2"
+    // missing the seconds field) which would otherwise crash on .padStart().
+    const [h = '0', m = '0', s = '0'] = hms.split(':')
     const ms = String(Number(cs ?? '0') * 10).padStart(3, '0')
     return `${h.padStart(2, '0')}:${m.padStart(2, '0')}:${s.padStart(2, '0')},${ms}`
   }
