@@ -491,9 +491,12 @@ export default class StreamingController {
       headers: Object.keys(proxyHeaders).length > 0 ? proxyHeaders : undefined,
     })
 
-    response.response.once('close', () => {
+    // BUG #9 fix: store the cleanup listener so we can remove it on the error path,
+    // preventing a dangling listener from leaking on every failed proxy stream.
+    const cleanupListener = () => {
       if (!upstream.destroyed) upstream.destroy()
-    })
+    }
+    response.response.once('close', cleanupListener)
 
     try {
       const started = await new Promise<boolean>((resolve, reject) => {
@@ -557,7 +560,8 @@ export default class StreamingController {
           response.header('x-jojoflix-selected-source-key', selectedSourceKey)
           response.header(
             'x-jojoflix-source-fallback',
-            requestedSourceKey == selectedSourceKey ? '0' : '1'
+            // BUG #14 fix: use strict equality to avoid type coercion on source key comparison.
+            requestedSourceKey === selectedSourceKey ? '0' : '1'
           )
 
           const headersToForward = [
@@ -590,6 +594,9 @@ export default class StreamingController {
     } catch (error) {
       try {
         if (!response.response.headersSent) {
+          // BUG #9 fix: remove the close listener before sending an error response
+          // so it doesn't fire and destroy an already-handled upstream.
+          response.response.removeListener('close', cleanupListener)
           response.status(502).json({
             error: { code: 'STREAM_PROXY_FAILED', message: 'Erreur de streaming', status: 502 },
           })
