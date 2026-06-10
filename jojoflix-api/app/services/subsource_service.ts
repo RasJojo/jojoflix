@@ -1,6 +1,13 @@
 import CacheWrapper, { CACHE_TTL } from '#services/cache_wrapper'
 import got from 'got'
 
+// Circuit breaker for FlareSolverr — prevents AdonisJS worker saturation when
+// FlareSolverr is hanging or unavailable.
+let flareFailCount = 0
+let flareLastFailTime = 0
+const FLARE_CIRCUIT_OPEN_THRESHOLD = 3
+const FLARE_CIRCUIT_COOLDOWN_MS = 60_000
+
 const FLARE_SESSION_ID = 'subsource_v1'
 const SUBSOURCE_HOST = 'https://subsource.net'
 const API_HOST = 'https://api.subsource.net'
@@ -333,18 +340,37 @@ export default class SubsourceService {
   }
 
   private async flareFetch(url: string, maxTimeout = 60_000): Promise<string> {
-    const flareResponse = await got
-      .post(`${this.flareSolverrUrl}/v1`, {
-        json: { cmd: 'request.get', url, session: FLARE_SESSION_ID, maxTimeout },
-        timeout: { request: maxTimeout + 15_000 },
-        retry: { limit: 0 },
-      })
-      .json<FlareSolverrResponse>()
-
-    if (flareResponse.status !== 'ok' || !flareResponse.solution) {
-      throw new Error(`FlareSolverr fetch failed for ${url}: ${flareResponse.status}`)
+    // Circuit breaker: if FlareSolverr has failed repeatedly within the cooldown window,
+    // fail fast instead of blocking a worker thread.
+    if (
+      flareFailCount >= FLARE_CIRCUIT_OPEN_THRESHOLD &&
+      Date.now() - flareLastFailTime < FLARE_CIRCUIT_COOLDOWN_MS
+    ) {
+      throw new Error('FlareSolverr circuit open — too many recent failures, skipping')
     }
-    return flareResponse.solution.response
+
+    try {
+      const flareResponse = await got
+        .post(`${this.flareSolverrUrl}/v1`, {
+          json: { cmd: 'request.get', url, session: FLARE_SESSION_ID, maxTimeout },
+          timeout: { request: maxTimeout + 15_000 },
+          retry: { limit: 0 },
+        })
+        .json<FlareSolverrResponse>()
+
+      if (flareResponse.status !== 'ok' || !flareResponse.solution) {
+        flareFailCount++
+        flareLastFailTime = Date.now()
+        throw new Error(`FlareSolverr fetch failed for ${url}: ${flareResponse.status}`)
+      }
+
+      flareFailCount = 0
+      return flareResponse.solution.response
+    } catch (err) {
+      flareFailCount++
+      flareLastFailTime = Date.now()
+      throw err
+    }
   }
 
   // ─── Private: HTML scraping ──────────────────────────────────────────────────
@@ -438,10 +464,14 @@ export default class SubsourceService {
       const compressedSize = zipBuffer.readUInt32LE(offset + 18)
       const fnLen = zipBuffer.readUInt16LE(offset + 26)
       const extraLen = zipBuffer.readUInt16LE(offset + 28)
+      // Validate fnLen before slicing to avoid reading garbage filename data.
+      if (fnLen <= 0 || offset + 30 + fnLen > zipBuffer.length) { offset++; continue }
       const fileName = zipBuffer.slice(offset + 30, offset + 30 + fnLen).toString('utf-8').toLowerCase()
       const dataOffset = offset + 30 + fnLen + extraLen
 
       if (SUPPORTED.some((ext) => fileName.endsWith(ext))) {
+        // Validate data bounds before slicing to avoid OOB reads on corrupt zips.
+        if (dataOffset + compressedSize > zipBuffer.length) { offset = dataOffset + compressedSize; continue }
         const raw = zipBuffer.slice(dataOffset, dataOffset + compressedSize)
         const data = compression === 8 ? inflateRawSync(raw) : raw
         candidates.push({ name: fileName, data })

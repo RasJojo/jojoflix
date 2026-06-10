@@ -32,6 +32,9 @@ export default class RealDebridService {
   private readonly cache: CacheWrapper
 
   constructor() {
+    if (!RD_BASE_URL.startsWith('https://')) {
+      throw new Error('RD_BASE_URL must use HTTPS')
+    }
     this.apiKey = env.get('RD_API_KEY').release()
     this.cache = new CacheWrapper()
   }
@@ -187,20 +190,33 @@ export default class RealDebridService {
 
   private async pollTorrentReady(torrentId: string, maxAttempts: number): Promise<RdTorrentInfo> {
     for (let i = 0; i < maxAttempts; i++) {
-      const info = await got
-        .get(`${RD_BASE_URL}/torrents/info/${torrentId}`, {
-          headers: { Authorization: `Bearer ${this.apiKey}` },
-          retry: { limit: 0 },
-          timeout: { connect: 3_000, request: 8_000 },
-        })
-        .json<RdTorrentInfo>()
+      try {
+        const info = await got
+          .get(`${RD_BASE_URL}/torrents/info/${torrentId}`, {
+            headers: { Authorization: `Bearer ${this.apiKey}` },
+            retry: { limit: 0 },
+            timeout: { connect: 3_000, request: 8_000 },
+          })
+          .json<RdTorrentInfo>()
 
-      if (info.status === 'downloaded') {
-        return info
-      }
+        if (info.status === 'downloaded') {
+          return info
+        }
 
-      if (['error', 'magnet_error', 'virus', 'dead'].includes(info.status)) {
-        throw new Error(`RD_ERROR: Torrent status = ${info.status}`)
+        if (['error', 'magnet_error', 'virus', 'dead'].includes(info.status)) {
+          throw new Error(`RD_ERROR: Torrent status = ${info.status}`)
+        }
+      } catch (err) {
+        // Auth errors are permanent — propagate immediately.
+        const status = (err as { response?: { statusCode?: number } })?.response?.statusCode
+        if (status === 401 || status === 403) {
+          throw err
+        }
+        // Terminal RD status errors must also propagate immediately.
+        if (err instanceof Error && err.message.startsWith('RD_ERROR:')) {
+          throw err
+        }
+        // Transient network errors (ECONNRESET, 502, 503, etc.) — continue polling.
       }
 
       if (i < maxAttempts - 1) {
