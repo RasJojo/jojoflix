@@ -11,7 +11,7 @@ SubtitleRepository subtitleRepository(Ref ref) {
 }
 
 class SubtitleEntry {
-  final int fileId;
+  final String fileId;
   final String language;
   final String releaseName;
   final bool hearingImpaired;
@@ -25,7 +25,7 @@ class SubtitleEntry {
 
   factory SubtitleEntry.fromJson(Map<String, dynamic> json) {
     return SubtitleEntry(
-      fileId: json['file_id'] as int,
+      fileId: json['file_id'].toString(),
       language: json['language'] as String,
       releaseName: json['release_name'] as String? ?? '',
       hearingImpaired: json['hearing_impaired'] as bool? ?? false,
@@ -143,7 +143,7 @@ class SubtitleRepository {
 
   /// Retourne l'URL proxy /api/subtitles/vtt/:id à passer au player.
   Future<String> downloadSubtitle(
-    int fileId,
+    String fileId,
     String language, {
     Duration timeout = const Duration(seconds: 6),
   }) async {

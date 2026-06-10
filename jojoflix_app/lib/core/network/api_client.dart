@@ -15,6 +15,26 @@ const String _hostedApiBaseUrl = 'https://jojoflixapi.jojoserv.com';
 const String _tokenKey = 'auth_token';
 const String _profileIdKey = 'active_profile_id';
 
+bool isLegacyAuthToken(String? token) =>
+    token != null && token.startsWith('oat_');
+
+bool isLegacyProfileId(String? profileId) {
+  if (profileId == null || profileId.trim().isEmpty) return false;
+  return RegExp(r'^\d+$').hasMatch(profileId.trim());
+}
+
+Future<void> removeLegacySessionState(SharedPreferences prefs) async {
+  if (isLegacyAuthToken(prefs.getString(_tokenKey))) {
+    await prefs.remove(_tokenKey);
+    await prefs.remove(_profileIdKey);
+    return;
+  }
+
+  if (isLegacyProfileId(prefs.getString(_profileIdKey))) {
+    await prefs.remove(_profileIdKey);
+  }
+}
+
 // Overridé dans main() avec la valeur déjà initialisée
 @Riverpod(keepAlive: true)
 SharedPreferences sharedPreferences(Ref ref) {
@@ -47,11 +67,15 @@ class ApiClient {
       InterceptorsWrapper(
         onRequest: (options, handler) async {
           final token = prefs.getString(_tokenKey);
-          if (token != null) {
+          if (isLegacyAuthToken(token)) {
+            await clearSession();
+          } else if (token != null) {
             options.headers['Authorization'] = 'Bearer $token';
           }
           final profileId = prefs.getString(_profileIdKey);
-          if (profileId != null) {
+          if (isLegacyProfileId(profileId)) {
+            await prefs.remove(_profileIdKey);
+          } else if (profileId != null) {
             options.headers['X-Profile-Id'] = profileId;
           }
           handler.next(options);
@@ -92,6 +116,7 @@ class ApiClient {
 
   Future<void> saveToken(String token) async {
     await prefs.setString(_tokenKey, token);
+    await prefs.remove(_profileIdKey);
   }
 
   Future<void> saveProfileId(String profileId) async {

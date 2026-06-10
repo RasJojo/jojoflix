@@ -19,13 +19,15 @@ import '../repository/transcode_repository.dart';
 class PlayerScreen extends ConsumerStatefulWidget {
   final String tmdbId;
   final String mediaType;
-  final int profileId;
+  final String profileId;
   final int? season;
   final int? episode;
   final int startPosition;
   final String? title;
   final String? subtitle;
   final String? artworkUrl;
+  final String? localVideoPath;
+  final List<Map<String, dynamic>> localSubtitles;
 
   const PlayerScreen({
     super.key,
@@ -38,6 +40,8 @@ class PlayerScreen extends ConsumerStatefulWidget {
     this.title,
     this.subtitle,
     this.artworkUrl,
+    this.localVideoPath,
+    this.localSubtitles = const [],
   });
 
   @override
@@ -62,6 +66,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   List<MediaMarker> _markers = const [];
 
   String? _activeSourceKey;
+  final Set<String> _exhaustedSourceKeys = {};
   // Clé utilisée dans le sélecteur de sous-titres pour afficher la sélection active.
   String _subtitleSelectionKey = 'off';
 
@@ -122,6 +127,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         _fatalError = null;
         _subtitleSelectionKey = 'off';
         _skipIntroHandled = false;
+        _exhaustedSourceKeys.clear();
       });
     }
     _stopAutoNextTimer(resetCountdown: true, resetCancellation: true);
@@ -174,7 +180,35 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
     final playerNotifier = ref.read(videoPlayerNotifierProvider.notifier);
     try {
+      final localVideoPath = widget.localVideoPath;
+      if (localVideoPath != null && localVideoPath.trim().isNotEmpty) {
+        await playerNotifier.loadLocalFile(
+          localVideoPath.trim(),
+          startPosition: widget.startPosition,
+        );
+        await _applyBestLocalSubtitle();
+        return;
+      }
+
       await _restorePreferredSource();
+
+      // Si on a une source préférée sauvegardée, la sonder avant de l'utiliser.
+      // Un lien RD expiré ou une source morte est détecté ici, avant que le
+      // player essaie de la lire et reste en chargement indéfini.
+      if (_activeSourceKey != null && _activeSourceKey!.isNotEmpty) {
+        final probe = await _probeSourceAvailability(
+          _activeSourceKey!,
+          timeout: const Duration(seconds: 4),
+        );
+        if (!probe.ok) {
+          _exhaustedSourceKeys.add(_activeSourceKey!);
+          _activeSourceKey = null;
+        } else if (probe.selectedSourceKey != null &&
+            probe.selectedSourceKey != _activeSourceKey) {
+          _activeSourceKey = probe.selectedSourceKey;
+        }
+      }
+
       var streamStarted = false;
       try {
         await playerNotifier.loadStream(
@@ -192,7 +226,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       }
 
       if (!streamStarted) {
-        await _loadSources(showErrorSnackBar: false, includeSlowProviders: false);
+        await _loadSources(
+            showErrorSnackBar: false, includeSlowProviders: false);
         if (_sources.isEmpty) {
           if (!mounted) return;
           setState(() {
@@ -217,12 +252,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           await _persistPreferredSourceKey(persistedKey);
         }
       } else {
-        unawaited(
-          _loadSources(showErrorSnackBar: false, includeSlowProviders: false),
-        );
+        // Don't unawaited here — we need sources populated before subtitle
+        // auto-apply so _subtitleReleaseMatchScore() can match against them.
+        await _loadSources(
+            showErrorSnackBar: false, includeSlowProviders: false);
       }
 
       unawaited(_prewarmNextEpisode(preferredSourceKey: _activeSourceKey));
+      await _restoreSeriesPreferences();
       await _loadMarkers();
       await _loadOpenSubtitles(showErrorSnackBar: false);
       _syncTrackSelections();
@@ -233,6 +270,46 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     } finally {
       if (mounted) setState(() => _isBootstrapping = false);
     }
+  }
+
+  Future<void> _applyBestLocalSubtitle() async {
+    if (widget.localSubtitles.isEmpty) {
+      return;
+    }
+    final sorted = [...widget.localSubtitles]..sort((a, b) {
+        int rank(Map<String, dynamic> item) {
+          final language = (item['language'] as String? ?? '').toLowerCase();
+          if (language == 'fr' ||
+              language.startsWith('fr-') ||
+              language == 'french') {
+            return 0;
+          }
+          if (language == 'en' ||
+              language.startsWith('en-') ||
+              language == 'english') {
+            return 1;
+          }
+          return 2;
+        }
+
+        return rank(a).compareTo(rank(b));
+      });
+    final path = sorted.first['path'] as String?;
+    if (path == null || path.isEmpty) return;
+    try {
+      await ref
+          .read(videoPlayerNotifierProvider.notifier)
+          .loadLocalSubtitleFile(
+            path,
+            label: sorted.first['displayName'] as String?,
+            language: sorted.first['language'] as String?,
+          );
+      if (mounted) {
+        setState(() {
+          _subtitleSelectionKey = 'local:${sorted.first['language'] ?? path}';
+        });
+      }
+    } catch (_) {}
   }
 
   Future<void> _loadSources({
@@ -284,8 +361,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         episode: widget.episode,
       );
       items.sort((a, b) {
-        final byPriority =
-            _subtitleLanguageRank(a.language) - _subtitleLanguageRank(b.language);
+        final byPriority = _subtitleLanguageRank(a.language) -
+            _subtitleLanguageRank(b.language);
         if (byPriority != 0) return byPriority;
         final byReleaseMatch =
             _subtitleReleaseMatchScore(b) - _subtitleReleaseMatchScore(a);
@@ -302,7 +379,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       setState(() => _openSubtitles = items);
     } catch (_) {
       if (!mounted || !showErrorSnackBar) return;
-      _showErrorSnackBar('Impossible de charger les sous-titres OpenSubtitles Pro.');
+      _showErrorSnackBar(
+          'Impossible de charger les sous-titres OpenSubtitles Pro.');
     } finally {
       if (mounted) setState(() => _isLoadingSubtitles = false);
     }
@@ -350,7 +428,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     if (!_canGoToNextEpisode) return false;
     if (playerState.isLoading || !playerState.isPlaying) return false;
     final outro = _markerByType('outro');
-    if (outro != null) return _isPositionInsideMarker(outro, playerState.position);
+    if (outro != null) {
+      return _isPositionInsideMarker(outro, playerState.position);
+    }
     return playerState.nearEnd;
   }
 
@@ -410,7 +490,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   Future<void> _skipIntro(MediaMarker marker) async {
-    await ref.read(videoPlayerNotifierProvider.notifier).skipToSecond(marker.endTime);
+    await ref
+        .read(videoPlayerNotifierProvider.notifier)
+        .skipToSecond(marker.endTime);
     if (!mounted) return;
     setState(() => _skipIntroHandled = true);
   }
@@ -421,6 +503,40 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       _autoNextCancelled = true;
       _stopAutoNextTimer(resetCountdown: true, resetCancellation: false);
     });
+  }
+
+  Future<void> _handleStallExhausted() async {
+    if (!mounted || _isSwitchingSource || _isBootstrapping) return;
+    if (_sources.isEmpty) return;
+
+    final failedKey = _activeSourceKey;
+    if (failedKey != null) _exhaustedSourceKeys.add(failedKey);
+
+    // Filtre les sources déjà épuisées pour ne pas reboucler.
+    final candidates =
+        _sources.where((s) => !_exhaustedSourceKeys.contains(s.key)).toList();
+    if (candidates.isEmpty) return; // Toutes les sources ont échoué.
+
+    if (mounted) setState(() => _isSwitchingSource = true);
+    try {
+      final nextKey = await _selectBestPlayableSource(
+        preferredKey: candidates.first.key,
+      );
+      if (!mounted || nextKey == null || nextKey == failedKey) return;
+      setState(() => _activeSourceKey = nextKey);
+      final playerNotifier = ref.read(videoPlayerNotifierProvider.notifier);
+      await playerNotifier.loadStream(
+        tmdbId: widget.tmdbId,
+        mediaType: widget.mediaType,
+        profileId: widget.profileId,
+        season: widget.season,
+        episode: widget.episode,
+        startPosition: ref.read(videoPlayerNotifierProvider).position.inSeconds,
+        sourceKey: nextKey,
+      );
+    } finally {
+      if (mounted) setState(() => _isSwitchingSource = false);
+    }
   }
 
   Future<String?> _selectBestPlayableSource({String? preferredKey}) async {
@@ -445,7 +561,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           isApple ? const Duration(seconds: 3) : const Duration(seconds: 2);
       final probeTimeout =
           remaining > maxProbeTimeout ? maxProbeTimeout : remaining;
-      final probe = await _probeSourceAvailability(source.key, timeout: probeTimeout);
+      final probe =
+          await _probeSourceAvailability(source.key, timeout: probeTimeout);
       if (probe.ok) return probe.selectedSourceKey ?? source.key;
     }
 
@@ -455,10 +572,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
   List<TorrentSource> _orderedSourceCandidates(String? preferredKey) {
     if (_sources.isEmpty) return const [];
+    // Exclure les sources déjà épuisées (stall ou probe raté).
+    final available =
+        _sources.where((s) => !_exhaustedSourceKeys.contains(s.key)).toList();
+    if (available.isEmpty) return _sources; // fallback : toutes, même épuisées
     final preferred = (preferredKey == null || preferredKey.isEmpty)
         ? <TorrentSource>[]
-        : _sources.where((s) => s.key == preferredKey).toList();
-    final others = _sources.where((s) => s.key != preferredKey).toList();
+        : available.where((s) => s.key == preferredKey).toList();
+    final others = available.where((s) => s.key != preferredKey).toList();
 
     if (_isApplePlatform) {
       others.sort((a, b) {
@@ -486,18 +607,36 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
   int _sourceLanguageRank(TorrentSource source) {
     final text = '${source.name} ${source.tags.join(' ')}'.toLowerCase();
-    if (RegExp(r'\b(truefrench|vff|vfq)\b', caseSensitive: false).hasMatch(text)) return 0;
-    if (RegExp(r'\b(french|français|francais|vf)\b', caseSensitive: false).hasMatch(text) &&
+    if (RegExp(r'\b(truefrench|vff|vfq)\b', caseSensitive: false)
+        .hasMatch(text)) {
+      return 0;
+    }
+    if (RegExp(r'\b(french|français|francais|vf)\b', caseSensitive: false)
+            .hasMatch(text) &&
         !RegExp(r'\b(vostfr|subfrench|vost|rus|russian|italian|german|spanish)\b',
                 caseSensitive: false)
             .hasMatch(text)) {
       return 1;
     }
-    if (RegExp(r'\b(vostfr|subfrench|vost)\b', caseSensitive: false).hasMatch(text)) return 2;
-    if (RegExp(r'\b(english|anglais|eng)\b', caseSensitive: false).hasMatch(text)) return 3;
-    if (RegExp(r'\b(japanese|japonais|jpn)\b', caseSensitive: false).hasMatch(text)) return 4;
-    if (RegExp(r'\b(korean|coreen|coréen|kor)\b', caseSensitive: false).hasMatch(text)) return 5;
-    if (RegExp(r'\b(rus|russian|italian|german|spanish)\b', caseSensitive: false).hasMatch(text)) {
+    if (RegExp(r'\b(vostfr|subfrench|vost)\b', caseSensitive: false)
+        .hasMatch(text)) {
+      return 2;
+    }
+    if (RegExp(r'\b(english|anglais|eng)\b', caseSensitive: false)
+        .hasMatch(text)) {
+      return 3;
+    }
+    if (RegExp(r'\b(japanese|japonais|jpn)\b', caseSensitive: false)
+        .hasMatch(text)) {
+      return 4;
+    }
+    if (RegExp(r'\b(korean|coreen|coréen|kor)\b', caseSensitive: false)
+        .hasMatch(text)) {
+      return 5;
+    }
+    if (RegExp(r'\b(rus|russian|italian|german|spanish)\b',
+            caseSensitive: false)
+        .hasMatch(text)) {
       return 20;
     }
     return 10;
@@ -507,7 +646,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     final text = '${source.name} ${source.tags.join(' ')}'.toLowerCase();
     var score = 0;
     if (source.hasDirectUrl) score += 10;
-    if ((source.cachedRank ?? 0) >= 2 || text.contains('cached') || text.contains('⚡')) {
+    if ((source.cachedRank ?? 0) >= 2 ||
+        text.contains('cached') ||
+        text.contains('⚡')) {
       score += 7;
     }
     final resolution = source.resolution.toLowerCase();
@@ -598,10 +739,26 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
   int _subtitleLanguageRank(String language) {
     final normalized = language.toLowerCase().trim();
-    if (normalized == 'fr' || normalized.startsWith('fr-') || normalized == 'french') return 0;
-    if (normalized == 'en' || normalized.startsWith('en-') || normalized == 'english') return 1;
-    if (normalized == 'ja' || normalized.startsWith('ja-') || normalized == 'japanese') return 2;
-    if (normalized == 'ko' || normalized.startsWith('ko-') || normalized == 'korean') return 3;
+    if (normalized == 'fr' ||
+        normalized.startsWith('fr-') ||
+        normalized == 'french') {
+      return 0;
+    }
+    if (normalized == 'en' ||
+        normalized.startsWith('en-') ||
+        normalized == 'english') {
+      return 1;
+    }
+    if (normalized == 'ja' ||
+        normalized.startsWith('ja-') ||
+        normalized == 'japanese') {
+      return 2;
+    }
+    if (normalized == 'ko' ||
+        normalized.startsWith('ko-') ||
+        normalized == 'korean') {
+      return 3;
+    }
     return 10;
   }
 
@@ -632,7 +789,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     final location = Uri(
       path: '/player/${widget.mediaType}/${widget.tmdbId}',
       queryParameters: {
-        'profileId': widget.profileId.toString(),
+        'profileId': widget.profileId,
         'season': widget.season!.toString(),
         'episode': episodeNumber.toString(),
         'startPosition': '0',
@@ -664,8 +821,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                 itemBuilder: (context, index) {
                   final source = _sources[index];
                   final isSelected = source.key == _activeSourceKey;
-                  final tags =
-                      source.tags.isEmpty ? '' : ' • ${source.tags.join(' / ')}';
+                  final tags = source.tags.isEmpty
+                      ? ''
+                      : ' • ${source.tags.join(' / ')}';
                   return ListTile(
                     selected: isSelected,
                     selectedColor: AppColors.textPrimary,
@@ -687,7 +845,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                       style: const TextStyle(color: AppColors.textSecondary),
                     ),
                     trailing: isSelected
-                        ? const Icon(Icons.check_circle, color: AppColors.primary)
+                        ? const Icon(Icons.check_circle,
+                            color: AppColors.primary)
                         : null,
                     onTap: () => Navigator.of(context).pop(source),
                   );
@@ -754,9 +913,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               separatorBuilder: (_, __) => const Divider(height: 1),
               itemBuilder: (context, index) {
                 final track = data.tracks[index];
-                final trackLabel = data.labelsByTrackId[track.id] ?? track.label;
-                final isSelected =
-                    data.activeTrack != null && data.activeTrack!.id == track.id;
+                final trackLabel =
+                    data.labelsByTrackId[track.id] ?? track.label;
+                final isSelected = data.activeTrack != null &&
+                    data.activeTrack!.id == track.id;
                 return ListTile(
                   title: Text(trackLabel,
                       maxLines: 1,
@@ -779,8 +939,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
     try {
       final playerNotifier = ref.read(videoPlayerNotifierProvider.notifier);
-      await playerNotifier.setAudioTrack(selectedTrack);
+      await playerNotifier.setAudioTrack(selectedTrack).timeout(
+            const Duration(seconds: 15),
+            onTimeout: () =>
+                throw TimeoutException('audio track switch timed out'),
+          );
       if (!mounted) return;
+      unawaited(_saveSeriesAudioLang(selectedTrack));
       _syncTrackSelections();
     } catch (_) {
       if (!mounted) return;
@@ -807,18 +972,167 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     return 'preferred_source:${widget.profileId}:${widget.mediaType}:${widget.tmdbId}:s$season';
   }
 
+  bool get _isTvSeries => widget.mediaType == 'tv';
+
+  String _seriesSubDelayKey() =>
+      'series_sub_delay_ms:${widget.profileId}:${widget.tmdbId}';
+
+  String _seriesSubProviderKey() =>
+      'series_sub_provider:${widget.profileId}:${widget.tmdbId}';
+
+  String _seriesAudioLangKey() =>
+      'series_audio_lang:${widget.profileId}:${widget.tmdbId}';
+
+  Future<void> _saveSeriesSubDelay(int ms) async {
+    if (!_isTvSeries) return;
+    final prefs = ref.read(sharedPreferencesProvider);
+    await prefs.setInt(_seriesSubDelayKey(), ms);
+  }
+
+  Future<void> _saveSeriesSubProvider(String fileId) async {
+    if (!_isTvSeries) return;
+    final provider = fileId.startsWith('subdl:')
+        ? 'subdl'
+        : fileId.startsWith('subsource:html:')
+            ? 'subsource'
+            : 'opensubtitles';
+    await _saveSeriesSubProviderValue(provider);
+  }
+
+  Future<void> _saveSeriesEmbeddedSubProvider(PlayerTrack track) async {
+    if (!_isTvSeries) return;
+    final notifier = ref.read(videoPlayerNotifierProvider.notifier);
+    final lang = notifier.getSubtitleTrackLanguage(track.id);
+    final provider =
+        lang == null || lang.isEmpty ? 'embedded' : 'embedded:$lang';
+    await _saveSeriesSubProviderValue(provider);
+  }
+
+  Future<void> _saveSeriesSubProviderValue(String provider) async {
+    if (!_isTvSeries) return;
+    final prefs = ref.read(sharedPreferencesProvider);
+    await prefs.setString(_seriesSubProviderKey(), provider);
+  }
+
+  Future<void> _saveSeriesAudioLang(PlayerTrack track) async {
+    if (!_isTvSeries) return;
+    final notifier = ref.read(videoPlayerNotifierProvider.notifier);
+    final lang = notifier.getAudioTrackLanguage(track.id);
+    if (lang == null || lang.isEmpty) return;
+    final prefs = ref.read(sharedPreferencesProvider);
+    await prefs.setString(_seriesAudioLangKey(), lang);
+    notifier.setAudioLanguagePreference(lang);
+  }
+
+  Future<void> _restoreSeriesPreferences() async {
+    if (!_isTvSeries) return;
+    final prefs = ref.read(sharedPreferencesProvider);
+    final notifier = ref.read(videoPlayerNotifierProvider.notifier);
+
+    // Restore audio language override first (before track polling).
+    final savedLang = prefs.getString(_seriesAudioLangKey());
+    if (savedLang != null && savedLang.isNotEmpty) {
+      notifier.setAudioLanguagePreference(savedLang);
+    }
+
+    // Restore subtitle delay.
+    final savedDelay = prefs.getInt(_seriesSubDelayKey());
+    if (savedDelay != null && savedDelay != 0) {
+      await notifier.setSubtitleDelayMs(savedDelay);
+    }
+
+    final savedSubProvider = prefs.getString(_seriesSubProviderKey());
+    if (savedSubProvider == 'off') {
+      await notifier.disableSubtitles();
+      if (mounted) setState(() => _subtitleSelectionKey = 'off');
+    } else if (savedSubProvider?.startsWith('embedded') == true) {
+      await _applySavedEmbeddedSubtitleProvider(savedSubProvider!);
+    }
+  }
+
+  String? _savedSeriesSubProvider() {
+    if (!_isTvSeries) return null;
+    return ref
+        .read(sharedPreferencesProvider)
+        .getString(_seriesSubProviderKey());
+  }
+
+  Future<void> _applySavedEmbeddedSubtitleProvider(String provider) async {
+    final playerNotifier = ref.read(videoPlayerNotifierProvider.notifier);
+    final tracks = playerNotifier.subtitleTracks;
+    if (tracks.isEmpty) return;
+
+    final parts = provider.split(':');
+    final savedLang = parts.length > 1 ? parts[1].trim().toLowerCase() : '';
+    PlayerTrack? selected;
+    if (savedLang.isNotEmpty) {
+      for (final track in tracks) {
+        final lang = playerNotifier.getSubtitleTrackLanguage(track.id);
+        if (_languageMatchesPreference(lang, savedLang)) {
+          selected = track;
+          break;
+        }
+      }
+      if (selected == null) return;
+    } else {
+      selected = playerNotifier.activeEmbeddedSubtitleTrack ?? tracks.first;
+    }
+
+    await playerNotifier.setEmbeddedSubtitleTrack(selected);
+    if (!mounted) return;
+    setState(() => _subtitleSelectionKey = 'embedded:${selected!.id}');
+  }
+
+  bool _languageMatchesPreference(String? language, String preferred) {
+    final normalized = language?.trim().toLowerCase();
+    if (normalized == null || normalized.isEmpty) return false;
+    if (normalized == preferred) return true;
+    const aliases = {
+      'fr': ['fr', 'fra', 'fre', 'french'],
+      'fra': ['fr', 'fra', 'fre', 'french'],
+      'fre': ['fr', 'fra', 'fre', 'french'],
+      'en': ['en', 'eng', 'english'],
+      'eng': ['en', 'eng', 'english'],
+      'ko': ['ko', 'kor', 'korean'],
+      'kor': ['ko', 'kor', 'korean'],
+      'ja': ['ja', 'jpn', 'japanese'],
+      'jpn': ['ja', 'jpn', 'japanese'],
+    };
+    return aliases[preferred]?.contains(normalized) ?? false;
+  }
+
+  // Les sources RD expirent — on ne garde la préférence que 24h.
+  static const _preferredSourceMaxAgeMs = 24 * 60 * 60 * 1000;
+
   Future<void> _restorePreferredSource() async {
     if (_activeSourceKey != null && _activeSourceKey!.isNotEmpty) return;
     final prefs = ref.read(sharedPreferencesProvider);
     final saved = prefs.getString(_preferredSourceStorageKey());
     if (saved == null || saved.isEmpty) return;
-    _activeSourceKey = saved;
+
+    // Format: "sourceKey|savedAtMs"
+    final parts = saved.split('|');
+    if (parts.length < 2) {
+      // Ancienne entrée sans timestamp → ignorer
+      await prefs.remove(_preferredSourceStorageKey());
+      return;
+    }
+    final savedAtMs = int.tryParse(parts.last);
+    if (savedAtMs == null) return;
+    if (DateTime.now().millisecondsSinceEpoch - savedAtMs >
+        _preferredSourceMaxAgeMs) {
+      await prefs.remove(_preferredSourceStorageKey());
+      return;
+    }
+    _activeSourceKey = parts.sublist(0, parts.length - 1).join('|');
   }
 
   Future<void> _persistPreferredSourceKey(String sourceKey) async {
     if (sourceKey.isEmpty) return;
     final prefs = ref.read(sharedPreferencesProvider);
-    await prefs.setString(_preferredSourceStorageKey(), sourceKey);
+    final savedAtMs = DateTime.now().millisecondsSinceEpoch;
+    await prefs.setString(
+        _preferredSourceStorageKey(), '$sourceKey|$savedAtMs');
   }
 
   Future<void> _prewarmNextEpisode({String? preferredSourceKey}) async {
@@ -885,8 +1199,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                   trailing: _subtitleSelectionKey == key
                       ? const Icon(Icons.check_circle, color: AppColors.primary)
                       : null,
-                  onTap: () =>
-                      Navigator.of(context).pop(_SubtitleChoice.embedded(track)),
+                  onTap: () => Navigator.of(context)
+                      .pop(_SubtitleChoice.embedded(track)),
                 );
               }),
             const Divider(height: 1),
@@ -919,7 +1233,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                       ? Text(entry.releaseName,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(color: AppColors.textSecondary))
+                          style:
+                              const TextStyle(color: AppColors.textSecondary))
                       : null,
                   trailing: _subtitleSelectionKey == key
                       ? const Icon(Icons.check_circle, color: AppColors.primary)
@@ -942,12 +1257,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           await playerNotifier.disableSubtitles();
           if (!mounted) return;
           setState(() => _subtitleSelectionKey = 'off');
+          unawaited(_saveSeriesSubProviderValue('off'));
 
         case _SubtitleChoiceKind.embedded:
           final track = choice.embeddedTrack!;
           await playerNotifier.setEmbeddedSubtitleTrack(track);
           if (!mounted) return;
           setState(() => _subtitleSelectionKey = 'embedded:${track.id}');
+          unawaited(_saveSeriesEmbeddedSubProvider(track));
 
         case _SubtitleChoiceKind.openSubtitle:
           final entry = choice.openSubtitle!;
@@ -955,6 +1272,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           if (!mounted) return;
           setState(() =>
               _subtitleSelectionKey = _openSubtitleSelectionKey(appliedEntry));
+          unawaited(_saveSeriesSubProvider(appliedEntry.fileId));
           if (appliedEntry.fileId != entry.fileId) {
             _showInfoSnackBar(
                 'Sous-titre alternatif chargé (${appliedEntry.displayName}).');
@@ -985,6 +1303,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               if (!mounted) return;
               _syncTrackSelections();
               setSheetState(() {});
+              unawaited(_saveSeriesSubDelay(playerNotifier.subtitleDelayMs));
             } catch (_) {
               if (!mounted) return;
               _showErrorSnackBar("Impossible d'appliquer la synchro ST.");
@@ -1002,14 +1321,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               padding: const EdgeInsets.fromLTRB(
                   AppSpacing.md, AppSpacing.md, AppSpacing.md, AppSpacing.lg),
               children: [
-                _SyncStepperRow(
-                  label: 'Décalage sous-titres',
-                  hint: 'ms',
-                  value: '${delayMs >= 0 ? '+' : ''}$delayMs',
-                  onMinus: () =>
-                      apply(() => playerNotifier.adjustSubtitleDelay(-250)),
-                  onPlus: () =>
-                      apply(() => playerNotifier.adjustSubtitleDelay(250)),
+                _SubtitleDelayRow(
+                  delayMs: delayMs,
+                  onStep: (delta) =>
+                      apply(() => playerNotifier.adjustSubtitleDelay(delta)),
+                  onReset: () => apply(() async {
+                    await playerNotifier.resetSubtitleTiming();
+                    unawaited(_saveSeriesSubDelay(0));
+                  }),
                 ),
                 const SizedBox(height: AppSpacing.md),
                 _SyncStepperRow(
@@ -1022,20 +1341,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                   onPlus: () =>
                       apply(() => playerNotifier.adjustSubtitleScale(0.005)),
                 ),
-                const SizedBox(height: AppSpacing.md),
+                const SizedBox(height: AppSpacing.sm),
                 const Text(
-                  'Actif sur la piste de sous-titres en cours.',
+                  'Actif sur la piste de sous-titres en cours. Le décalage est mémorisé pour tous les épisodes de cette série.',
                   style: TextStyle(color: AppColors.textSecondary),
-                ),
-                const SizedBox(height: AppSpacing.md),
-                OutlinedButton.icon(
-                  onPressed: () => apply(playerNotifier.resetSubtitleTiming),
-                  icon: const Icon(Icons.restart_alt),
-                  label: const Text('Réinitialiser'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: AppColors.textPrimary,
-                    side: const BorderSide(color: AppColors.textSecondary),
-                  ),
                 ),
               ],
             ),
@@ -1045,12 +1354,21 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     );
   }
 
+  Future<void> _adjustSubtitleDelayAndPersist(int deltaMs) async {
+    final playerNotifier = ref.read(videoPlayerNotifierProvider.notifier);
+    await playerNotifier.adjustSubtitleDelay(deltaMs);
+    unawaited(_saveSeriesSubDelay(playerNotifier.subtitleDelayMs));
+    if (!mounted) return;
+    setState(() {});
+  }
+
   Future<Map<int, String>> _resolveAudioLabels(List<PlayerTrack> tracks) async {
     final labels = <int, String>{
       for (final track in tracks) track.id: track.label,
     };
     try {
-      final infos = await ref.read(transcodeRepositoryProvider).getAudioTracks();
+      final infos =
+          await ref.read(transcodeRepositoryProvider).getAudioTracks();
       for (final info in infos) {
         final id = info.index;
         if (!labels.containsKey(id)) continue;
@@ -1103,7 +1421,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   Future<void> _maybeAutoApplyExternalFrenchSubtitle() async {
     final playerNotifier = ref.read(videoPlayerNotifierProvider.notifier);
     if (playerNotifier.isExternalSubtitleTrackSelected) return;
-    if (playerNotifier.activeEmbeddedSubtitleTrack != null) return;
+    final savedProvider = _savedSeriesSubProvider();
+    if (savedProvider == 'off' ||
+        savedProvider?.startsWith('embedded') == true) {
+      return;
+    }
+    if (playerNotifier.activeEmbeddedSubtitleTrack != null &&
+        savedProvider == null) {
+      return;
+    }
 
     final frenchSubtitles = _openSubtitles.where((entry) {
       final lang = entry.language.toLowerCase().trim();
@@ -1112,8 +1438,21 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
     if (frenchSubtitles.isEmpty) return;
 
+    List<SubtitleEntry> candidates = frenchSubtitles;
+    if (savedProvider != null) {
+      final preferred = frenchSubtitles.where((e) {
+        if (savedProvider == 'subdl') return e.fileId.startsWith('subdl:');
+        if (savedProvider == 'subsource') {
+          return e.fileId.startsWith('subsource:html:');
+        }
+        return !e.fileId.startsWith('subdl:') &&
+            !e.fileId.startsWith('subsource:html:');
+      }).toList();
+      if (preferred.isNotEmpty) candidates = preferred;
+    }
+
     try {
-      final best = frenchSubtitles.first;
+      final best = candidates.first;
       final appliedEntry = await _applyOpenSubtitleWithFallback(best);
       if (!mounted) return;
       setState(() =>
@@ -1129,7 +1468,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
     final sourceName = activeSource.rawName.isNotEmpty
         ? activeSource.rawName.trim().toLowerCase()
-        : '${activeSource.name} ${activeSource.tags.join(' ')}'.trim().toLowerCase();
+        : '${activeSource.name} ${activeSource.tags.join(' ')}'
+            .trim()
+            .toLowerCase();
     final releaseName = entry.releaseName.trim().toLowerCase();
     if (sourceName.isEmpty || releaseName.isEmpty) return 0;
 
@@ -1154,7 +1495,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         score += 3;
         continue;
       }
-      if (RegExp(r'^(x26[45]|h\.?26[45]|hevc|xvid|bluray|brrip|webrip|webdl|web-dl|hdrip|dvdrip)$')
+      if (RegExp(
+              r'^(x26[45]|h\.?26[45]|hevc|xvid|bluray|brrip|webrip|webdl|web-dl|hdrip|dvdrip)$')
           .hasMatch(token)) {
         score += 2;
         continue;
@@ -1184,15 +1526,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     final repo = ref.read(subtitleRepositoryProvider);
     final playerNotifier = ref.read(videoPlayerNotifierProvider.notifier);
     final candidates = _subtitleFallbackCandidates(preferred);
-    final deadline = DateTime.now().add(const Duration(seconds: 30));
+    final deadline = DateTime.now().add(const Duration(seconds: 120));
     Object? lastError;
 
     for (final entry in candidates.take(4)) {
       final remaining = deadline.difference(DateTime.now());
       if (remaining <= Duration.zero) break;
 
-      final downloadTimeout = remaining > const Duration(seconds: 15)
-          ? const Duration(seconds: 15)
+      final downloadTimeout = remaining > const Duration(seconds: 90)
+          ? const Duration(seconds: 90)
           : remaining;
       const loadTimeout = Duration(seconds: 8);
 
@@ -1285,8 +1627,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
   @override
   Widget build(BuildContext context) {
-    ref.listen(videoPlayerNotifierProvider, (_, next) {
+    ref.listen(videoPlayerNotifierProvider, (prev, next) {
       _onPlaybackStateChanged(next);
+      if (next.stallRecoveryExhausted &&
+          !(prev?.stallRecoveryExhausted ?? false)) {
+        unawaited(_handleStallExhausted());
+      }
     });
 
     final playerState = ref.watch(videoPlayerNotifierProvider);
@@ -1395,8 +1741,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           canGoPrev: _canGoToPreviousEpisode,
           canGoNext: _canGoToNextEpisode,
           onBack: _goBackToDetail,
-          onTogglePlayPause: () =>
-              unawaited(playerNotifier.togglePlayPause()),
+          onTogglePlayPause: () => unawaited(playerNotifier.togglePlayPause()),
           onSeekBackward: () => unawaited(_seekBackward15()),
           onSeekForward: () => unawaited(_seekForward15()),
           onSeek: (pos) => unawaited(playerNotifier.seekTo(pos)),
@@ -1407,11 +1752,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           onPreviousEpisode: _canGoToPreviousEpisode
               ? () => unawaited(_goToPreviousEpisode())
               : null,
-          onNextEpisode: _canGoToNextEpisode
-              ? () => unawaited(_goToNextEpisode())
-              : null,
-          onAdjustSubtitleDelay: (deltaMs) => unawaited(
-              ref.read(videoPlayerNotifierProvider.notifier).adjustSubtitleDelay(deltaMs)),
+          onNextEpisode:
+              _canGoToNextEpisode ? () => unawaited(_goToNextEpisode()) : null,
+          onAdjustSubtitleDelay: (deltaMs) =>
+              unawaited(_adjustSubtitleDelayAndPersist(deltaMs)),
         ),
 
         // Spinner de chargement (toujours visible, pas masqué par auto-hide)
@@ -1534,7 +1878,9 @@ class _PlayerControlsState extends State<_PlayerControls> {
       }
     }
     // Resume → restart auto-hide if overlay is visible.
-    if (!old.playerState.isPlaying && widget.playerState.isPlaying && _visible) {
+    if (!old.playerState.isPlaying &&
+        widget.playerState.isPlaying &&
+        _visible) {
       _scheduleHide();
     }
   }
@@ -1584,43 +1930,43 @@ class _PlayerControlsState extends State<_PlayerControls> {
       autofocus: true,
       onKeyEvent: _handleKeyEvent,
       child: Stack(
-      fit: StackFit.expand,
-      children: [
-        // Background tap: toggle overlay visibility.
-        // Placed first (bottom Z) so button taps above it win.
-        GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: _onBackgroundTap,
-          child: const SizedBox.expand(),
-        ),
+        fit: StackFit.expand,
+        children: [
+          // Background tap: toggle overlay visibility.
+          // Placed first (bottom Z) so button taps above it win.
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _onBackgroundTap,
+            child: const SizedBox.expand(),
+          ),
 
-      // Controls (interactive only when visible).
-        IgnorePointer(
-          ignoring: !_visible,
-          child: AnimatedOpacity(
-            opacity: _visible ? 1.0 : 0.0,
-            duration: const Duration(milliseconds: 250),
-            child: Stack(
-              children: [
-                // Top bar
-                Positioned(
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  child: _buildTopBar(),
-                ),
-                // Bottom bar
-                Positioned(
-                  bottom: 0,
-                  left: 0,
-                  right: 0,
-                  child: _buildBottomBar(ps, seekValue, displayPosition),
-                ),
-              ],
+          // Controls (interactive only when visible).
+          IgnorePointer(
+            ignoring: !_visible,
+            child: AnimatedOpacity(
+              opacity: _visible ? 1.0 : 0.0,
+              duration: const Duration(milliseconds: 250),
+              child: Stack(
+                children: [
+                  // Top bar
+                  Positioned(
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    child: _buildTopBar(),
+                  ),
+                  // Bottom bar
+                  Positioned(
+                    bottom: 0,
+                    left: 0,
+                    right: 0,
+                    child: _buildBottomBar(ps, seekValue, displayPosition),
+                  ),
+                ],
+              ),
             ),
           ),
-        ),
-      ],
+        ],
       ),
     );
   }
@@ -1726,7 +2072,9 @@ class _PlayerControlsState extends State<_PlayerControls> {
                         style: const TextStyle(
                           color: Colors.white70,
                           fontSize: 13,
-                          shadows: [Shadow(color: Colors.black54, blurRadius: 4)],
+                          shadows: [
+                            Shadow(color: Colors.black54, blurRadius: 4)
+                          ],
                         ),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -2076,7 +2424,8 @@ class _AutoNextCard extends StatelessWidget {
               alignment: Alignment.center,
               children: [
                 CircularProgressIndicator(
-                  value: remainingSeconds / _PlayerScreenState._autoNextDelaySeconds,
+                  value: remainingSeconds /
+                      _PlayerScreenState._autoNextDelaySeconds,
                   strokeWidth: 2.5,
                   backgroundColor: Colors.white24,
                   color: AppColors.primary,
@@ -2177,6 +2526,123 @@ class _SelectorSheet extends StatelessWidget {
             Expanded(child: child),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// =============================================================================
+// Décalage sous-titres multi-niveaux
+// =============================================================================
+
+class _SubtitleDelayRow extends StatelessWidget {
+  final int delayMs;
+  final void Function(int delta) onStep;
+  final VoidCallback onReset;
+
+  const _SubtitleDelayRow({
+    required this.delayMs,
+    required this.onStep,
+    required this.onReset,
+  });
+
+  String _formatDelay(int ms) {
+    final sign = ms >= 0 ? '+' : '-';
+    final abs = ms.abs();
+    if (abs >= 60000) {
+      final minutes = abs ~/ 60000;
+      final seconds = (abs % 60000) ~/ 1000;
+      final millis = abs % 1000;
+      if (millis == 0) {
+        return '$sign${minutes}m${seconds.toString().padLeft(2, '0')}s';
+      }
+    }
+    if (abs >= 1000) {
+      final s = (abs / 1000).toStringAsFixed(abs % 100 == 0 ? 1 : 3);
+      return '$sign${s}s';
+    }
+    return '$sign${abs}ms';
+  }
+
+  Widget _stepBtn(String label, int delta, {double fontSize = 12}) {
+    return Expanded(
+      child: InkWell(
+        onTap: () => onStep(delta),
+        borderRadius: BorderRadius.circular(6),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          child: Text(
+            label,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: AppColors.textPrimary,
+              fontSize: fontSize,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(AppSpacing.sm),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceVariant,
+        borderRadius: BorderRadius.circular(AppSpacing.sm),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Text('Décalage sous-titres',
+                    style: TextStyle(
+                        color: AppColors.textPrimary,
+                        fontWeight: FontWeight.w600)),
+              ),
+              Text(_formatDelay(delayMs),
+                  style: const TextStyle(
+                      color: AppColors.primary,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 16)),
+              const SizedBox(width: 8),
+              GestureDetector(
+                onTap: onReset,
+                child: const Icon(Icons.restart_alt,
+                    size: 18, color: AppColors.textSecondary),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              _stepBtn('-10m', -600000),
+              _stepBtn('-1m', -60000),
+              _stepBtn('-10s', -10000),
+              const SizedBox(width: 4),
+              _stepBtn('+10s', 10000),
+              _stepBtn('+1m', 60000),
+              _stepBtn('+10m', 600000),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              _stepBtn('-5s', -5000),
+              _stepBtn('-1s', -1000),
+              _stepBtn('-200ms', -200),
+              const SizedBox(width: 4),
+              _stepBtn('+200ms', 200),
+              _stepBtn('+1s', 1000),
+              _stepBtn('+5s', 5000),
+              _stepBtn('+60s', 60000),
+            ],
+          ),
+        ],
       ),
     );
   }

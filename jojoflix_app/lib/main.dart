@@ -4,13 +4,13 @@ import 'package:media_kit/media_kit.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'core/router/app_router.dart';
 import 'core/theme/app_theme.dart';
-import 'core/auth/auth_state_provider.dart';
 import 'core/network/api_client.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
   final prefs = await SharedPreferences.getInstance();
+  await removeLegacySessionState(prefs);
 
   runApp(ProviderScope(
     overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
@@ -19,12 +19,12 @@ void main() async {
 }
 
 class JojoflixApp extends ConsumerWidget {
-  const JojoflixApp({Key? key}) : super(key: key);
+  const JojoflixApp({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final goRouter = ref.watch(appRouterProvider);
-    
+
     return MaterialApp.router(
       title: 'JojoFlix',
       routerConfig: goRouter,

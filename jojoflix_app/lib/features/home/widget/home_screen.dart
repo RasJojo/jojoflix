@@ -17,8 +17,7 @@ part 'home_screen.g.dart';
 Future<List<HomeRow>> homeRows(Ref ref) async {
   final repo = ref.watch(homeRepositoryProvider);
   final prefs = ref.watch(sharedPreferencesProvider);
-  final profileIdStr = prefs.getString('active_profile_id');
-  final profileId = int.tryParse(profileIdStr ?? '') ?? 0;
+  final profileId = prefs.getString('active_profile_id') ?? '';
   return repo.getHomeRows(profileId);
 }
 

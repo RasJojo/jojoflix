@@ -115,6 +115,18 @@ export interface Registry {
       errorResponse: unknown
     }
   }
+  'home.browse': {
+    methods: ["GET","HEAD"]
+    pattern: '/api/browse/:mediaType'
+    types: {
+      body: {}
+      paramsTuple: [ParamValue]
+      params: { mediaType: ParamValue }
+      query: {}
+      response: unknown
+      errorResponse: unknown
+    }
+  }
   'streaming.movie_sources': {
     methods: ["GET","HEAD"]
     pattern: '/api/sources/movie/:tmdb_id'
@@ -259,9 +271,81 @@ export interface Registry {
       errorResponse: unknown
     }
   }
+  'people.show': {
+    methods: ["GET","HEAD"]
+    pattern: '/api/people/:personId'
+    types: {
+      body: {}
+      paramsTuple: [ParamValue]
+      params: { personId: ParamValue }
+      query: {}
+      response: unknown
+      errorResponse: unknown
+    }
+  }
+  'watchlist.index': {
+    methods: ["GET","HEAD"]
+    pattern: '/api/profiles/:id/watchlist'
+    types: {
+      body: {}
+      paramsTuple: [ParamValue]
+      params: { id: ParamValue }
+      query: {}
+      response: unknown
+      errorResponse: unknown
+    }
+  }
+  'watchlist.store': {
+    methods: ["POST"]
+    pattern: '/api/profiles/:id/watchlist'
+    types: {
+      body: {}
+      paramsTuple: [ParamValue]
+      params: { id: ParamValue }
+      query: {}
+      response: unknown
+      errorResponse: unknown
+    }
+  }
+  'watchlist.destroy': {
+    methods: ["DELETE"]
+    pattern: '/api/profiles/:id/watchlist/:mediaType/:tmdbId'
+    types: {
+      body: {}
+      paramsTuple: [ParamValue, ParamValue, ParamValue]
+      params: { id: ParamValue; mediaType: ParamValue; tmdbId: ParamValue }
+      query: {}
+      response: unknown
+      errorResponse: unknown
+    }
+  }
+  'transcode.info': {
+    methods: ["GET","HEAD"]
+    pattern: '/api/transcode/info'
+    types: {
+      body: {}
+      paramsTuple: []
+      params: {}
+      query: {}
+      response: unknown
+      errorResponse: unknown
+    }
+  }
   'transcode.tracks': {
     methods: ["GET","HEAD"]
     pattern: '/api/transcode/tracks'
+    types: {
+      body: {}
+      paramsTuple: []
+      params: {}
+      query: {}
+      response: unknown
+      errorResponse: unknown
+    }
+  }
+  'transcode.subtitle': {
+    methods: ["GET","HEAD"]
+    pattern: '/api/transcode/subtitle'
     types: {
       body: {}
       paramsTuple: []
@@ -278,6 +362,54 @@ export interface Registry {
       body: {}
       paramsTuple: []
       params: {}
+      query: {}
+      response: unknown
+      errorResponse: unknown
+    }
+  }
+  'download.movie': {
+    methods: ["GET","HEAD"]
+    pattern: '/api/download/movie/:tmdb_id'
+    types: {
+      body: {}
+      paramsTuple: [ParamValue]
+      params: { tmdb_id: ParamValue }
+      query: {}
+      response: unknown
+      errorResponse: unknown
+    }
+  }
+  'download.tv_episode': {
+    methods: ["GET","HEAD"]
+    pattern: '/api/download/tv/:tmdb_id/s/:season/e/:episode'
+    types: {
+      body: {}
+      paramsTuple: [ParamValue, ParamValue, ParamValue]
+      params: { tmdb_id: ParamValue; season: ParamValue; episode: ParamValue }
+      query: {}
+      response: unknown
+      errorResponse: unknown
+    }
+  }
+  'download.stream_movie': {
+    methods: ["GET","HEAD"]
+    pattern: '/api/download/stream/movie/:tmdb_id'
+    types: {
+      body: {}
+      paramsTuple: [ParamValue]
+      params: { tmdb_id: ParamValue }
+      query: {}
+      response: unknown
+      errorResponse: unknown
+    }
+  }
+  'download.stream_tv_episode': {
+    methods: ["GET","HEAD"]
+    pattern: '/api/download/stream/tv/:tmdb_id/s/:season/e/:episode'
+    types: {
+      body: {}
+      paramsTuple: [ParamValue, ParamValue, ParamValue]
+      params: { tmdb_id: ParamValue; season: ParamValue; episode: ParamValue }
       query: {}
       response: unknown
       errorResponse: unknown

@@ -1,19 +1,7 @@
-import redis from '@adonisjs/redis/services/main'
-
-const STREAM_KEY_PREFIX = 'stream:active:'
-const STREAM_URL_PREFIX = 'stream:url:'
-const STREAM_URL_BY_ID_PREFIX = 'stream:url:id:'
-const STREAM_SESSION_KEY_PREFIX = 'stream:session:'
-const STREAM_SESSION_SET_KEY = 'stream:session:index'
-const STREAM_TTL_SECONDS = 4 * 60 * 60 // 4h
-const STREAM_ACTIVE_WINDOW_SECONDS = (() => {
-  const raw = Number(process.env.MONITOR_ACTIVE_STREAM_WINDOW_SECONDS ?? 20)
-  if (!Number.isFinite(raw) || raw < 5) return 20
-  return Math.floor(raw)
-})()
+const STREAM_TTL_MS = 4 * 60 * 60 * 1000 // 4h
 
 export interface ActiveStreamSession {
-  user_id: number
+  user_id: string
   stream_id: string
   profile_id: number | null
   tmdb_id: string
@@ -58,38 +46,49 @@ export interface RegisterStreamSessionInput {
   stream_gpu_percent?: number | null
 }
 
-/**
- * StreamRegistry — Registre Redis des flux actifs.
- *
- * Mémorise les derniers flux/URLs vus pour un utilisateur.
- * Utilisé pour les endpoints de transcodage et le debug.
- */
+interface StreamEntry {
+  streamId: string
+  directUrl?: string
+  session?: ActiveStreamSession
+  expiresAt: number
+}
+
+// Singleton in-memory store — survives for the process lifetime.
+const store = new Map<string, StreamEntry>()
+
+const ACTIVE_WINDOW_SECONDS = (() => {
+  const raw = Number(process.env.MONITOR_ACTIVE_STREAM_WINDOW_SECONDS ?? 20)
+  if (!Number.isFinite(raw) || raw < 5) return 20
+  return Math.floor(raw)
+})()
+
+function isExpired(entry: StreamEntry): boolean {
+  return Date.now() > entry.expiresAt
+}
+
+function prune(): void {
+  for (const [userId, entry] of store) {
+    if (isExpired(entry)) store.delete(userId)
+  }
+}
+
 export default class StreamRegistry {
-  /**
-   * Enregistre un flux vu pour un utilisateur.
-   */
   async register(
-    userId: number,
+    userId: string,
     streamId: string,
     directUrl?: string,
     session?: RegisterStreamSessionInput
   ): Promise<void> {
-    const key = `${STREAM_KEY_PREFIX}${userId}`
-    await redis.set(key, streamId, 'EX', STREAM_TTL_SECONDS)
-    if (directUrl) {
-      await redis.set(`${STREAM_URL_PREFIX}${userId}`, directUrl, 'EX', STREAM_TTL_SECONDS)
-      await redis.set(
-        `${STREAM_URL_BY_ID_PREFIX}${userId}:${streamId}`,
-        directUrl,
-        'EX',
-        STREAM_TTL_SECONDS
-      )
+    prune()
+    const now = new Date().toISOString()
+    const existing = store.get(userId)
+    const entry: StreamEntry = {
+      streamId,
+      directUrl: directUrl ?? existing?.directUrl,
+      expiresAt: Date.now() + STREAM_TTL_MS,
     }
-
     if (session?.tmdb_id && session.media_type) {
-      const nowIso = new Date().toISOString()
-      const sessionKey = this.sessionKey(userId, streamId)
-      const payload: ActiveStreamSession = {
+      entry.session = {
         user_id: userId,
         stream_id: streamId,
         profile_id: session.profile_id ?? null,
@@ -99,8 +98,8 @@ export default class StreamRegistry {
         episode: session.episode ?? null,
         source_key: session.source_key ?? null,
         source_provider: session.source_provider ?? null,
-        started_at: session.started_at ?? nowIso,
-        last_activity_at: session.last_activity_at ?? nowIso,
+        started_at: session.started_at ?? now,
+        last_activity_at: session.last_activity_at ?? now,
         bytes_sent: session.bytes_sent ?? 0,
         current_bitrate_mbps: session.current_bitrate_mbps ?? null,
         direct_url_host: session.direct_url_host ?? null,
@@ -112,36 +111,32 @@ export default class StreamRegistry {
         stream_memory_mb: session.stream_memory_mb ?? null,
         stream_gpu_percent: session.stream_gpu_percent ?? null,
       }
-      await redis.set(sessionKey, JSON.stringify(payload), 'EX', STREAM_TTL_SECONDS)
-      await redis.sadd(STREAM_SESSION_SET_KEY, sessionKey)
-      await redis.expire(STREAM_SESSION_SET_KEY, STREAM_TTL_SECONDS)
+    } else if (existing?.session) {
+      entry.session = existing.session
     }
+    store.set(userId, entry)
   }
 
-  /**
-   * Retourne le streamId actif pour un utilisateur, ou null.
-   */
-  async getActive(userId: number): Promise<string | null> {
-    const key = `${STREAM_KEY_PREFIX}${userId}`
-    return redis.get(key)
+  async getActive(userId: string): Promise<string | null> {
+    const entry = store.get(userId)
+    if (!entry || isExpired(entry)) return null
+    return entry.streamId
   }
 
-  /**
-   * Retourne l'URL directe du flux actif pour un utilisateur, ou null.
-   */
-  async getActiveUrl(userId: number): Promise<string | null> {
-    return redis.get(`${STREAM_URL_PREFIX}${userId}`)
+  async getActiveUrl(userId: string): Promise<string | null> {
+    const entry = store.get(userId)
+    if (!entry || isExpired(entry)) return null
+    return entry.directUrl ?? null
   }
 
-  /**
-   * Retourne l'URL directe d'un stream précis.
-   */
-  async getUrlByStream(userId: number, streamId: string): Promise<string | null> {
-    return redis.get(`${STREAM_URL_BY_ID_PREFIX}${userId}:${streamId}`)
+  async getUrlByStream(userId: string, streamId: string): Promise<string | null> {
+    const entry = store.get(userId)
+    if (!entry || isExpired(entry) || entry.streamId !== streamId) return null
+    return entry.directUrl ?? null
   }
 
   async touchSession(
-    userId: number,
+    userId: string,
     streamId: string,
     patch: Partial<
       Pick<
@@ -157,115 +152,58 @@ export default class StreamRegistry {
       >
     >
   ): Promise<void> {
-    const key = this.sessionKey(userId, streamId)
-    const raw = await redis.get(key)
-    if (!raw) return
-
-    const parsed = this.parseSession(raw)
-    if (!parsed) {
-      await redis.del(key)
-      await redis.srem(STREAM_SESSION_SET_KEY, key)
-      return
-    }
-
-    const merged: ActiveStreamSession = {
-      ...parsed,
+    const entry = store.get(userId)
+    if (!entry || isExpired(entry) || entry.streamId !== streamId || !entry.session) return
+    entry.session = {
+      ...entry.session,
       ...patch,
       last_activity_at: patch.last_activity_at ?? new Date().toISOString(),
     }
-
-    await redis.set(key, JSON.stringify(merged), 'EX', STREAM_TTL_SECONDS)
-    await redis.sadd(STREAM_SESSION_SET_KEY, key)
-    await redis.expire(STREAM_SESSION_SET_KEY, STREAM_TTL_SECONDS)
+    entry.expiresAt = Date.now() + STREAM_TTL_MS
   }
 
   async listSessions(): Promise<ActiveStreamSession[]> {
-    const keys = await redis.smembers(STREAM_SESSION_SET_KEY)
-    if (keys.length === 0) return []
-
-    const values = await redis.mget(...keys)
+    prune()
     const sessions: ActiveStreamSession[] = []
-    const staleKeys: string[] = []
-
-    for (let index = 0; index < keys.length; index += 1) {
-      const raw = values[index]
-      if (!raw) {
-        staleKeys.push(keys[index])
-        continue
+    const cutoff = Date.now() - ACTIVE_WINDOW_SECONDS * 1000
+    for (const entry of store.values()) {
+      if (!entry.session) continue
+      const lastActivity = Date.parse(entry.session.last_activity_at)
+      if (Number.isFinite(lastActivity) && lastActivity >= cutoff) {
+        sessions.push(entry.session)
       }
-      const parsed = this.parseSession(raw)
-      if (!parsed) {
-        staleKeys.push(keys[index])
-        continue
-      }
-      if (this.isSessionStale(parsed)) {
-        staleKeys.push(keys[index])
-        continue
-      }
-      sessions.push(parsed)
     }
-
-    if (staleKeys.length > 0) {
-      await redis.srem(STREAM_SESSION_SET_KEY, ...staleKeys)
-    }
-
-    return sessions.sort((a, b) => {
-      const left = Date.parse(b.last_activity_at) || 0
-      const right = Date.parse(a.last_activity_at) || 0
-      return left - right
-    })
+    return sessions.sort(
+      (a, b) => (Date.parse(b.last_activity_at) || 0) - (Date.parse(a.last_activity_at) || 0)
+    )
   }
 
-  async endSession(userId: number, streamId: string): Promise<void> {
-    const sessionKey = this.sessionKey(userId, streamId)
-    await redis.del(sessionKey, `${STREAM_URL_BY_ID_PREFIX}${userId}:${streamId}`)
-    await redis.srem(STREAM_SESSION_SET_KEY, sessionKey)
+  async endSession(userId: string, streamId: string): Promise<void> {
+    const entry = store.get(userId)
+    if (entry && entry.streamId === streamId) store.delete(userId)
+  }
 
-    const activeStreamId = await this.getActive(userId)
-    if (activeStreamId === streamId) {
-      await redis.del(`${STREAM_KEY_PREFIX}${userId}`, `${STREAM_URL_PREFIX}${userId}`)
-    }
+  async clear(userId: string): Promise<void> {
+    store.delete(userId)
   }
 
   /**
-   * Supprime le flux actif pour un utilisateur.
-   * Appelé au logout et au switch de profil.
+   * Invalidate the current stream for a user without registering a new one.
+   * Stores a tombstone entry (no URL) so that concurrent getActiveUrl() calls
+   * return null until a full register() with a URL is performed.
    */
-  async clear(userId: number): Promise<void> {
-    await redis.del(`${STREAM_KEY_PREFIX}${userId}`, `${STREAM_URL_PREFIX}${userId}`)
-
-    const sessionKeys = await redis.smembers(STREAM_SESSION_SET_KEY)
-    const ownedKeys = sessionKeys.filter((key) => key.startsWith(`${STREAM_SESSION_KEY_PREFIX}${userId}:`))
-    if (ownedKeys.length > 0) {
-      await redis.del(...ownedKeys)
-      await redis.srem(STREAM_SESSION_SET_KEY, ...ownedKeys)
+  async invalidate(userId: string): Promise<void> {
+    prune()
+    const streamId = '__invalidated__'
+    const entry: StreamEntry = {
+      streamId,
+      expiresAt: Date.now() + STREAM_TTL_MS,
     }
+    store.set(userId, entry)
   }
 
-  /**
-   * Vérifie si un flux est actif pour un utilisateur.
-   */
-  async hasActiveStream(userId: number): Promise<boolean> {
-    const active = await this.getActive(userId)
-    return active !== null
-  }
-
-  private sessionKey(userId: number, streamId: string): string {
-    return `${STREAM_SESSION_KEY_PREFIX}${userId}:${streamId}`
-  }
-
-  private parseSession(raw: string): ActiveStreamSession | null {
-    try {
-      return JSON.parse(raw) as ActiveStreamSession
-    } catch {
-      return null
-    }
-  }
-
-  private isSessionStale(session: ActiveStreamSession): boolean {
-    const lastActivityAt = Date.parse(session.last_activity_at)
-    if (!Number.isFinite(lastActivityAt) || lastActivityAt <= 0) return true
-    return Date.now() - lastActivityAt > STREAM_ACTIVE_WINDOW_SECONDS * 1000
+  async hasActiveStream(userId: string): Promise<boolean> {
+    const entry = store.get(userId)
+    return !!entry && !isExpired(entry)
   }
 }
-// Registry

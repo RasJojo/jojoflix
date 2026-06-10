@@ -1,7 +1,7 @@
 name: jojoflix_app
 description: JojoFlix — Plateforme de streaming VOD self-hosted multiplateforme
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.7+6
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -19,15 +19,16 @@ dependencies:
   go_router: ^14.8.1
 
   # Video player
-  media_kit: ^1.1.11
+  media_kit: ^1.2.6
   media_kit_video: ^2.0.1
-  media_kit_libs_video: ^1.0.5
+  media_kit_libs_video: ^1.0.7
 
   # Images & cache
   cached_network_image: ^3.4.1
 
   # Storage
   shared_preferences: ^2.3.5
+  path_provider: ^2.1.5
 
   # HTTP client
   dio: ^5.8.0

@@ -14,16 +14,17 @@ class MainScaffold extends StatelessWidget {
     required this.selectedIndex,
   });
 
-  // Desktop top nav — 5 items, index matches selectedIndex from router
+  // Desktop top nav — 6 items, index matches selectedIndex from router
   static const _desktopDestinations = [
     (label: 'Accueil', route: '/home'),
     (label: 'Films', route: '/browse/movie'),
     (label: 'Séries', route: '/browse/tv'),
     (label: 'Recherche', route: '/search'),
+    (label: 'Téléchargements', route: '/downloads'),
     (label: 'Mon Profil', route: '/profiles'),
   ];
 
-  // Mobile bottom nav — 3 items
+  // Mobile bottom nav — 4 items
   static const _mobileDestinations = [
     (
       icon: Icons.home_outlined,
@@ -38,6 +39,12 @@ class MainScaffold extends StatelessWidget {
       route: '/search'
     ),
     (
+      icon: Icons.download_outlined,
+      activeIcon: Icons.download,
+      label: 'Téléchargements',
+      route: '/downloads'
+    ),
+    (
       icon: Icons.person_outline,
       activeIcon: Icons.person,
       label: 'Mon Profil',
@@ -45,11 +52,12 @@ class MainScaffold extends StatelessWidget {
     ),
   ];
 
-  // selectedIndex (5 items desktop, -1 = no active) → mobile index (3 items)
+  // selectedIndex (6 items desktop, -1 = no active) → mobile index (4 items)
   int _mobileIndex() {
     if (selectedIndex < 0) return 0;
     if (selectedIndex == 3) return 1;
     if (selectedIndex == 4) return 2;
+    if (selectedIndex == 5) return 3;
     return 0;
   }
 

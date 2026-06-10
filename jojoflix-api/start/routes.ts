@@ -19,6 +19,7 @@ import ProgressController from '#controllers/progress_controller'
 import MediaController from '#controllers/media_controller'
 import PeopleController from '#controllers/people_controller'
 import WatchlistController from '#controllers/watchlist_controller'
+import DownloadController from '#controllers/download_controller'
 
 router.get('/', () => {
   return { status: 'ok', service: 'jojoflix-api' }
@@ -115,6 +116,17 @@ router
         router.get('audio', [TranscodeController, 'audio'])
       })
       .prefix('transcode')
+
+    // ── Download ──────────────────────────────────────────────────────────────
+    router
+      .group(() => {
+        router.get('movie/:tmdb_id', [DownloadController, 'movie'])
+        router.get('tv/:tmdb_id/s/:season/e/:episode', [DownloadController, 'tvEpisode'])
+        router.get('stream/movie/:tmdb_id', [DownloadController, 'streamMovie'])
+        router.get('stream/tv/:tmdb_id/s/:season/e/:episode', [DownloadController, 'streamTvEpisode'])
+      })
+      .prefix('download')
+      .use(middleware.auth())
 
     // ── Progress ──────────────────────────────────────────────────────────────
     router.get('progress/:mediaType/:tmdbId', [ProgressController, 'show']).use(middleware.auth())

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -8,6 +9,7 @@ import '../../../core/native/native_playback_bridge.dart';
 import '../../../core/network/api_client.dart';
 import '../repository/progress_repository.dart';
 import '../repository/transcode_repository.dart';
+import '../utils/subtitle_timing.dart';
 
 class VideoPlayerState {
   final bool isLoading;
@@ -16,6 +18,7 @@ class VideoPlayerState {
   final Duration duration;
   final String? errorCode;
   final bool nearEnd;
+  final bool stallRecoveryExhausted;
 
   const VideoPlayerState({
     this.isLoading = true,
@@ -24,6 +27,7 @@ class VideoPlayerState {
     this.duration = Duration.zero,
     this.errorCode,
     this.nearEnd = false,
+    this.stallRecoveryExhausted = false,
   });
 
   VideoPlayerState copyWith({
@@ -33,6 +37,7 @@ class VideoPlayerState {
     Duration? duration,
     String? errorCode,
     bool? nearEnd,
+    bool? stallRecoveryExhausted,
   }) {
     return VideoPlayerState(
       isLoading: isLoading ?? this.isLoading,
@@ -41,6 +46,8 @@ class VideoPlayerState {
       duration: duration ?? this.duration,
       errorCode: errorCode,
       nearEnd: nearEnd ?? this.nearEnd,
+      stallRecoveryExhausted:
+          stallRecoveryExhausted ?? this.stallRecoveryExhausted,
     );
   }
 
@@ -60,6 +67,8 @@ class PlayerTrack {
 }
 
 enum _SubtitleSelectionMode { off, external, embedded }
+
+const int _maxSubtitleDelayMs = 60 * 60 * 1000;
 
 final videoPlayerNotifierProvider =
     StateNotifierProvider.autoDispose<VideoPlayerNotifier, VideoPlayerState>(
@@ -90,12 +99,13 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
   String? _mediaType;
   String? _authToken;
   String? _sourceKey;
-  int? _profileId;
+  String? _profileId;
   int? _season;
   int? _episode;
 
   int _subtitleDelayMs = 0;
   double _subtitleScale = 1.0;
+  String? _audioLanguageOverride;
   // Source VTT injectee dans le player (OpenSubtitles ou piste integree exportee).
   String? _externalSubtitleOriginalVtt;
   String? _externalSubtitleLabel;
@@ -185,7 +195,7 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
   Future<void> loadStream({
     required String tmdbId,
     required String mediaType,
-    int? profileId,
+    String? profileId,
     int? season,
     int? episode,
     int startPosition = 0,
@@ -216,17 +226,16 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
 
     final prefs = ref.read(sharedPreferencesProvider);
     final storedProfileId = prefs.getString('active_profile_id');
-    final parsedStoredProfileId =
-        storedProfileId != null ? int.tryParse(storedProfileId) : null;
     final providedProfileId =
-        profileId != null && profileId > 0 ? profileId : null;
+        profileId != null && profileId.isNotEmpty ? profileId : null;
     _profileId = providedProfileId ??
-        ((parsedStoredProfileId != null && parsedStoredProfileId > 0)
-            ? parsedStoredProfileId
+        (storedProfileId != null && storedProfileId.isNotEmpty
+            ? storedProfileId
             : null);
     _authToken = prefs.getString('auth_token');
 
-    state = const VideoPlayerState(isLoading: true);
+    state =
+        const VideoPlayerState(isLoading: true, stallRecoveryExhausted: false);
     _cancelStallRecovery();
     _stallRecoveryAttempts = 0;
     _isRecoveringStall = false;
@@ -242,6 +251,27 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
     );
     await _reopenFromPath(streamPath, resumeAtSeconds: startPosition);
     _startProgressSync();
+  }
+
+  Future<void> loadLocalFile(
+    String filePath, {
+    int startPosition = 0,
+  }) async {
+    _tmdbId ??= 'offline';
+    _mediaType ??= 'offline';
+    _sourceKey = null;
+    _externalSubtitleOriginalVtt = null;
+    _externalSubtitleLabel = null;
+    _externalSubtitleLanguage = null;
+    _selectedEmbeddedSubtitleTrack = null;
+    _subtitleSelectionMode = _SubtitleSelectionMode.off;
+    state =
+        const VideoPlayerState(isLoading: true, stallRecoveryExhausted: false);
+    _cancelStallRecovery();
+    _stallRecoveryAttempts = 0;
+    _isRecoveringStall = false;
+    await _reopenFromPath(Uri.file(filePath).toString(),
+        resumeAtSeconds: startPosition);
   }
 
   Future<void> switchSource(String sourceKey) async {
@@ -296,8 +326,9 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
   }
 
   Future<void> adjustSubtitleDelay(int deltaMs) async {
-    _subtitleDelayMs =
-        (_subtitleDelayMs + deltaMs).clamp(-60 * 1000, 60 * 1000).toInt();
+    _subtitleDelayMs = (_subtitleDelayMs + deltaMs)
+        .clamp(-_maxSubtitleDelayMs, _maxSubtitleDelayMs)
+        .toInt();
     await _applySubtitleTimingToPlayer();
   }
 
@@ -318,6 +349,29 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
     await _applySubtitleTimingToPlayer();
   }
 
+  // Sets subtitle delay to an absolute value (used to restore saved per-series delay).
+  Future<void> setSubtitleDelayMs(int ms) async {
+    _subtitleDelayMs =
+        ms.clamp(-_maxSubtitleDelayMs, _maxSubtitleDelayMs).toInt();
+    await _applySubtitleTimingToPlayer();
+  }
+
+  // Returns the raw language code of an audio track by its player index.
+  String? getAudioTrackLanguage(int trackId) {
+    if (trackId < 0 || trackId >= _audioTrackRefs.length) return null;
+    return _audioTrackRefs[trackId].language?.trim().toLowerCase();
+  }
+
+  String? getSubtitleTrackLanguage(int trackId) {
+    if (trackId < 0 || trackId >= _subtitleTrackRefs.length) return null;
+    return _subtitleTrackRefs[trackId].language?.trim().toLowerCase();
+  }
+
+  // Overrides the preferred audio language for this session (per-series pref).
+  void setAudioLanguagePreference(String? lang) {
+    _audioLanguageOverride = lang?.trim().toLowerCase();
+  }
+
   Future<void> loadSubtitle(
     String url, {
     Duration timeout = const Duration(seconds: 6),
@@ -334,6 +388,21 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
     } catch (_) {
       rethrow;
     }
+  }
+
+  Future<void> loadLocalSubtitleFile(
+    String filePath, {
+    String? label,
+    String? language,
+  }) async {
+    final content = await File(filePath).readAsString();
+    if (content.trim().isEmpty) return;
+    _externalSubtitleOriginalVtt = _normalizeExternalVtt(content);
+    _externalSubtitleLabel = label ?? 'Sous-titre hors ligne';
+    _externalSubtitleLanguage = language ?? '';
+    _subtitleSelectionMode = _SubtitleSelectionMode.external;
+    _selectedEmbeddedSubtitleTrack = null;
+    await _applyExternalSubtitleTrack();
   }
 
   Future<void> disableSubtitles() async {
@@ -388,21 +457,36 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
     final original = _externalSubtitleOriginalVtt;
     if (original == null || original.trim().isEmpty) return;
 
-    // On injecte toujours le VTT avec ses timestamps d'origine (pas de décalage
-    // dans le contenu). Le décalage et la vitesse sont appliqués via les
-    // propriétés mpv sub-delay / sub-speed, plus simples et plus fiables
-    // que la ré-injection du VTT à chaque ajustement.
+    // Shift timestamps directly in the VTT — works reliably on all platforms
+    // including macOS where MPV sub-delay may not apply to data-URI tracks.
+    // UI convention: positive delay means "advance subtitles" (show them earlier).
+    final content = (_subtitleDelayMs != 0 || _subtitleScale != 1.0)
+        ? shiftAndScaleWebVtt(original,
+            delayMs: _subtitleDelayMs, scale: _subtitleScale)
+        : original;
+
+    // Remove previously injected data tracks first so the new one gets
+    // auto-selected and old tracks don't accumulate between sync adjustments.
     await _removeInjectedSubtitleTracks();
-    await _player.setSubtitleTrack(SubtitleTrack.no());
     await _player.setSubtitleTrack(
       SubtitleTrack.data(
-        original,
+        content,
         title: _externalSubtitleLabel,
         language: _externalSubtitleLanguage,
       ),
     );
-    await _applyNativeSubtitleDelay();
+    // Reset MPV sub-delay to zero — timing is already baked into VTT timestamps.
+    _resetNativeSubtitleDelay();
     _refreshTrackRefs();
+  }
+
+  void _resetNativeSubtitleDelay() {
+    final platform = _player.platform;
+    if (platform == null) return;
+    try {
+      (platform as dynamic).setProperty('sub-delay', '0.000');
+      (platform as dynamic).setProperty('sub-speed', '1.0000');
+    } catch (_) {}
   }
 
   /// Supprime via mpv toutes les pistes sous-titres ajoutées dynamiquement
@@ -440,67 +524,30 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
   }
 
   Future<void> _applySubtitleTimingToPlayer() async {
-    // Le décalage est TOUJOURS appliqué via sub-delay/sub-speed mpv,
-    // qu'il s'agisse de pistes embarquées ou externes (OpenSubtitles).
-    // Cela évite de ré-injecter le VTT à chaque ajustement et fonctionne
-    // sur toutes les plateformes supportant libmpv.
-    await _applyNativeSubtitleDelay();
+    if (_externalSubtitleOriginalVtt != null) {
+      // VTT content available — re-inject with shifted timestamps.
+      // Covers both external (OpenSubtitles) and embedded-as-VTT (iOS/macOS).
+      // sub-delay does not reliably affect data-URI tracks in MPV.
+      await _applyExternalSubtitleTrack();
+    } else {
+      // Native embedded track: use MPV sub-delay property.
+      await _applyNativeSubtitleDelay();
+    }
   }
 
   Future<void> _applyNativeSubtitleDelay({bool includeScale = true}) async {
     final platform = _player.platform;
     if (platform == null) return;
     try {
+      // MPV convention is the opposite of the UI: positive sub-delay shows
+      // subtitles later. Store one UI-facing value and invert only at output.
       await (platform as dynamic).setProperty(
-          'sub-delay', (_subtitleDelayMs / 1000).toStringAsFixed(3));
+          'sub-delay', (-_subtitleDelayMs / 1000).toStringAsFixed(3));
       await (platform as dynamic).setProperty('sub-speed',
           (includeScale ? _subtitleScale : 1.0).toStringAsFixed(4));
     } catch (_) {
       // Plateforme sans accès libmpv bas niveau.
     }
-  }
-
-  String _shiftAndScaleWebVtt(
-    String content, {
-    required int delayMs,
-    required double scale,
-  }) {
-    final cuePattern = RegExp(
-      r'^((?:\d{2}:)?\d{2}:\d{2}[.,]\d{3})\s*-->\s*((?:\d{2}:)?\d{2}:\d{2}[.,]\d{3})(.*)$',
-      multiLine: true,
-    );
-    return content.replaceAllMapped(cuePattern, (match) {
-      final startMs = _parseWebVttTimestamp(match.group(1)!);
-      final endMs = _parseWebVttTimestamp(match.group(2)!);
-      if (startMs == null || endMs == null) return match.group(0)!;
-
-      var shiftedStart = ((startMs * scale) + delayMs).round();
-      var shiftedEnd = ((endMs * scale) + delayMs).round();
-      if (shiftedStart < 0) shiftedStart = 0;
-      if (shiftedEnd <= shiftedStart) shiftedEnd = shiftedStart + 250;
-
-      final tail = match.group(3) ?? '';
-      return '${_formatWebVttTimestamp(shiftedStart)} --> ${_formatWebVttTimestamp(shiftedEnd)}$tail';
-    });
-  }
-
-  int? _parseWebVttTimestamp(String value) {
-    final normalized = value.replaceAll(',', '.').trim();
-    final parts = normalized.split(':');
-    if (parts.length != 2 && parts.length != 3) return null;
-
-    final secondsPart = parts.last.split('.');
-    if (secondsPart.length != 2) return null;
-
-    final hours = parts.length == 3 ? int.tryParse(parts[0]) : 0;
-    final minutes = int.tryParse(parts[parts.length - 2]);
-    final seconds = int.tryParse(secondsPart[0]);
-    final millis = int.tryParse(secondsPart[1]);
-    if (hours == null || minutes == null || seconds == null || millis == null) {
-      return null;
-    }
-
-    return (((hours * 60) + minutes) * 60 + seconds) * 1000 + millis;
   }
 
   String _normalizeExternalVtt(String raw) {
@@ -546,14 +593,6 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
       return 'WEBVTT\n\n$trimmed';
     }
     return trimmed;
-  }
-
-  String _formatWebVttTimestamp(int totalMs) {
-    final hours = totalMs ~/ 3600000;
-    final minutes = (totalMs % 3600000) ~/ 60000;
-    final seconds = (totalMs % 60000) ~/ 1000;
-    final millis = totalMs % 1000;
-    return '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}.${millis.toString().padLeft(3, '0')}';
   }
 
   void _bindPlayerStreams() {
@@ -648,6 +687,18 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
     _player.stream.error.listen((error) {
       if (error.contains('didn\'t interact with the document first')) {
         state = state.copyWith(isLoading: false, isPlaying: false);
+        return;
+      }
+      // mpv reports "filtered" when all demuxed tracks are excluded by config
+      // (e.g. hwdec mismatch, bad track ID from a previous session). Treat this
+      // as a hard stream failure so the player_screen source-switch logic kicks in.
+      final lower = error.toLowerCase();
+      if (!state.stallRecoveryExhausted &&
+          (lower.contains('filtered') ||
+              lower.contains('no streams') ||
+              lower.contains('no video') ||
+              lower.contains('no audio'))) {
+        state = state.copyWith(isLoading: false, stallRecoveryExhausted: true);
       }
     });
   }
@@ -723,8 +774,7 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
     bool isNative(SubtitleTrack t) =>
         t.id != 'no' && t.id != 'auto' && !t.uri && !t.data;
 
-    final explicitNativeTracks =
-        tracks.where(isNative).toList(growable: false);
+    final explicitNativeTracks = tracks.where(isNative).toList(growable: false);
 
     if (explicitNativeTracks.isNotEmpty) {
       _knownNativeSubtitleTrackIds =
@@ -766,6 +816,10 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
       await (platform as dynamic)
           .setProperty('demuxer-max-back-bytes', '67108864');
       await (platform as dynamic).setProperty('network-timeout', '90');
+      // Suppress all mpv OSD text rendered onto the video texture — raw mpv
+      // error/status messages must never be visible to the user.
+      await (platform as dynamic).setProperty('osd-level', '0');
+      await (platform as dynamic).setProperty('osd-bar', 'no');
     } catch (_) {
       // Certaines plateformes n'exposent pas ces propriétés mpv.
     }
@@ -788,7 +842,10 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
           (state.position - _stallBufferedPosition).inSeconds.abs();
       if (stalledFor > 2) return;
 
-      if (_stallRecoveryAttempts >= 2) return;
+      if (_stallRecoveryAttempts >= 2) {
+        state = state.copyWith(stallRecoveryExhausted: true);
+        return;
+      }
       _stallRecoveryAttempts += 1;
       _isRecoveringStall = true;
 
@@ -906,6 +963,16 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
     String path, {
     int? resumeAtSeconds,
   }) async {
+    // Ensure OSD is suppressed before every open — the async init may not have
+    // completed yet on the first call, so we re-apply here unconditionally.
+    final platform = _player.platform;
+    if (platform != null) {
+      try {
+        await (platform as dynamic).setProperty('osd-level', '0');
+        await (platform as dynamic).setProperty('osd-bar', 'no');
+      } catch (_) {}
+    }
+
     _pendingStartPosition = (resumeAtSeconds != null && resumeAtSeconds > 0)
         ? resumeAtSeconds
         : null;
@@ -941,9 +1008,11 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
     final activeAudio = _player.state.track.audio;
     final audioLang = activeAudio.language?.trim().toLowerCase() ?? '';
     final audioTitle = activeAudio.title?.trim().toLowerCase() ?? '';
-    final isFrenchAudio = audioLang == 'fr' || audioLang == 'fra' || audioLang == 'fre' ||
+    final isFrenchAudio = audioLang == 'fr' ||
+        audioLang == 'fra' ||
+        audioLang == 'fre' ||
         RegExp(r'\b(truefrench|vff|vfq|vf|french|français|francais)\b',
-            caseSensitive: false)
+                caseSensitive: false)
             .hasMatch('$audioLang $audioTitle');
     if (isFrenchAudio) return;
 
@@ -956,7 +1025,9 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
       final track = _subtitleTrackRefs[i];
       final lang = track.language?.trim().toLowerCase() ?? '';
       final title = track.title?.trim().toLowerCase() ?? '';
-      if (lang == 'fr' || lang == 'fra' || lang == 'fre' ||
+      if (lang == 'fr' ||
+          lang == 'fra' ||
+          lang == 'fre' ||
           lang.startsWith('fr-') ||
           frenchSubRe.hasMatch(title)) {
         _selectedEmbeddedSubtitleTrack = PlayerTrack(
@@ -1117,26 +1188,65 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
     final title = track.title?.trim().toLowerCase() ?? '';
     final combined = '$language $title'.trim();
 
+    // Per-series override beats everything (user explicitly picked this lang).
+    final override = _audioLanguageOverride;
+    if (override != null && override.isNotEmpty) {
+      final langAliases = {
+        'fr': ['fr', 'fra', 'fre'],
+        'en': ['en', 'eng'],
+        'ko': ['ko', 'kor'],
+        'ja': ['ja', 'jpn'],
+        'es': ['es', 'spa'],
+        'de': ['de', 'deu', 'ger'],
+        'pt': ['pt', 'por'],
+        'it': ['it', 'ita'],
+        'zh': ['zh', 'zho', 'chi'],
+        'ar': ['ar', 'ara'],
+        'ru': ['ru', 'rus'],
+        'tr': ['tr', 'tur'],
+      };
+      final aliases = langAliases[override] ?? [override];
+      if (aliases.contains(language)) return 20;
+    }
+
     // French — highest priority
-    if (language == 'fr' || language == 'fra' || language == 'fre') { return 10; }
+    if (language == 'fr' || language == 'fra' || language == 'fre') {
+      return 10;
+    }
     if (RegExp(r'\b(truefrench|vff|vfq|french|français|francais)\b',
             caseSensitive: false)
-        .hasMatch(combined)) { return 9; }
+        .hasMatch(combined)) {
+      return 9;
+    }
     if (RegExp(r'(^|[^a-z])vf([^a-z]|$)', caseSensitive: false)
-        .hasMatch(combined)) { return 8; }
+        .hasMatch(combined)) {
+      return 8;
+    }
 
     // Japanese = Korean (anime / K-drama)
-    if (language == 'ja' || language == 'jpn') { return 5; }
-    if (language == 'ko' || language == 'kor') { return 5; }
+    if (language == 'ja' || language == 'jpn') {
+      return 5;
+    }
+    if (language == 'ko' || language == 'kor') {
+      return 5;
+    }
     if (RegExp(r'\b(japanese|japonais|jpn)\b', caseSensitive: false)
-        .hasMatch(combined)) { return 4; }
+        .hasMatch(combined)) {
+      return 4;
+    }
     if (RegExp(r'\b(korean|cor[eé]en|kor)\b', caseSensitive: false)
-        .hasMatch(combined)) { return 4; }
+        .hasMatch(combined)) {
+      return 4;
+    }
 
     // English — fallback
-    if (language == 'en' || language == 'eng') { return 2; }
+    if (language == 'en' || language == 'eng') {
+      return 2;
+    }
     if (RegExp(r'\b(english|anglais|eng)\b', caseSensitive: false)
-        .hasMatch(combined)) { return 1; }
+        .hasMatch(combined)) {
+      return 1;
+    }
 
     return 0;
   }
@@ -1169,7 +1279,7 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
     required String mediaType,
     int? season,
     int? episode,
-    int? profileId,
+    String? profileId,
     String? sourceKey,
     String? token,
   }) {
@@ -1184,8 +1294,8 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
     if (sourceKey != null && sourceKey.isNotEmpty) {
       queryParams['source_key'] = sourceKey;
     }
-    if (profileId != null && profileId > 0) {
-      queryParams['profile_id'] = profileId.toString();
+    if (profileId != null && profileId.isNotEmpty) {
+      queryParams['profile_id'] = profileId;
     }
     if (token != null && token.isNotEmpty) {
       queryParams['token'] = token;
@@ -1200,7 +1310,7 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
     _progressTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       if (!state.isPlaying || state.isLoading) return;
       if (_tmdbId == null || _profileId == null) return;
-      if (_profileId! <= 0) return;
+      if (_profileId!.isEmpty) return;
 
       ref
           .read(progressRepositoryProvider)
