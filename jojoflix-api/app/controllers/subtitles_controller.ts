@@ -204,10 +204,14 @@ export default class SubtitlesController {
 
     try {
       const cache = new CacheWrapper()
-      const normalizedLang = String(language || 'und')
-        .toLowerCase()
-        .replace(/[^a-z0-9-]/g, '')
-      const proxyId = crypto.createHash('md5').update(`${fileId}:${normalizedLang}`).digest('hex')
+      const normalizedLang =
+        String(language || 'und')
+          .toLowerCase()
+          .replace(/[^a-z0-9-]/g, '') || 'und'
+      // Include userId so two different users requesting the same subtitle get
+      // separate proxyIds — without this, user B's download() call overwrites
+      // vtt:owner for user A's proxyId and user A gets 403 on serveVtt().
+      const proxyId = crypto.createHash('md5').update(`${userId}:${fileId}:${normalizedLang}`).digest('hex')
       // Bind this proxyId to the requesting user so serveVtt() can enforce ownership.
       await cache.set(`vtt:owner:${proxyId}`, userId, CACHE_TTL.SUBTITLES)
 
@@ -281,7 +285,8 @@ export default class SubtitlesController {
       // Purger le cache en cas d'échec pour éviter de conserver un VTT vide ou corrompu.
       // BUG #3 fix: also purge vtt:owner so the user can retry instead of being stuck
       // with a 403/404 for the full TTL duration.
-      const failedProxyId = crypto.createHash('md5').update(`${fileId}:${String(language || 'und').toLowerCase().replace(/[^a-z0-9-]/g, '')}`).digest('hex')
+      const failedNormalizedLang = (String(language || 'und').toLowerCase().replace(/[^a-z0-9-]/g, '')) || 'und'
+      const failedProxyId = crypto.createHash('md5').update(`${userId}:${fileId}:${failedNormalizedLang}`).digest('hex')
       await new CacheWrapper().forget(`vtt:raw:${failedProxyId}`).catch(() => {})
       await new CacheWrapper().forget(`vtt:owner:${failedProxyId}`).catch(() => {})
       await new CacheWrapper().forget(`vtt:url:${failedProxyId}`).catch(() => {})
