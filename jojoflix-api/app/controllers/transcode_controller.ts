@@ -207,7 +207,7 @@ export default class TranscodeController {
     const killTimer = setTimeout(() => ff.kill('SIGKILL'), 4 * 60 * 60 * 1000)
 
     try {
-      response.response.on('close', () => ff.kill('SIGKILL'))
+      response.response.once('close', () => ff.kill('SIGKILL'))
       ff.stdout.pipe(response.response)
 
       await new Promise<void>((resolve) => {
@@ -244,11 +244,20 @@ export default class TranscodeController {
   private async resolveUserId(ctx: HttpContext): Promise<string | null> {
     if (ctx.betterAuthUser) return ctx.betterAuthUser.id
 
-    const queryToken = ctx.request.input('token') as string | undefined
-    if (!queryToken) return null
+    const authHeader = ctx.request.header('authorization') ?? ctx.request.header('Authorization')
+    let token: string | null = null
+    if (authHeader) {
+      const match = authHeader.match(/^Bearer\s+(.+)$/i)
+      if (match?.[1]) token = match[1].trim()
+    }
+    if (!token) {
+      const queryToken = ctx.request.input('token') as string | undefined
+      token = queryToken && queryToken.trim().length > 0 ? queryToken.trim() : null
+    }
+    if (!token) return null
 
     const session = await betterAuth.api
-      .getSession({ headers: new Headers({ authorization: `Bearer ${queryToken}` }) })
+      .getSession({ headers: new Headers({ authorization: `Bearer ${token}` }) })
       .catch(() => null)
     return session?.user.id ?? null
   }

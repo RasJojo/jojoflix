@@ -99,11 +99,19 @@ export default class SubtitlesService {
 
   async downloadSubtitle(fileId: string, language: string): Promise<SubtitleResult> {
     const numericId = Number(fileId)
-    if (!Number.isNaN(numericId)) {
+    if (!Number.isNaN(numericId) && Number.isInteger(numericId) && numericId > 0) {
       const isOssub = await this.cache.get<boolean>(`subtitles:ossub:${numericId}`)
       if (isOssub) {
         const link = await this.getOsubDownloadLink(numericId)
         return { url: link, language: this.normalizeLanguage(language) }
+      }
+      // ossub flag may have expired from cache (24h TTL) — attempt direct download
+      // rather than silently failing with "Subtitle not found".
+      try {
+        const link = await this.getOsubDownloadLink(numericId)
+        return { url: link, language: this.normalizeLanguage(language) }
+      } catch {
+        // Not an OpenSubtitles file_id — fall through to url cache lookup
       }
     }
 
