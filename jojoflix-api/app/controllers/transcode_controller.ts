@@ -203,8 +203,8 @@ export default class TranscodeController {
     const ff = spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'ignore'] })
 
     try {
-      ff.stdout.pipe(response.response)
       response.response.on('close', () => ff.kill('SIGKILL'))
+      ff.stdout.pipe(response.response)
 
       await new Promise<void>((resolve) => {
         ff.on('close', resolve)

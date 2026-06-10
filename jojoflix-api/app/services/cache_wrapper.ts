@@ -22,6 +22,9 @@ export default class CacheWrapper {
   }
 
   async set(key: string, value: unknown, ttlSeconds: number): Promise<void> {
+    if (ttlSeconds <= 0) {
+      throw new Error(`Cache TTL must be positive, got ${ttlSeconds}`)
+    }
     const expiresAtMs = Date.now() + ttlSeconds * 1000
     await this.repo.setCacheEntry(key, value, expiresAtMs)
   }

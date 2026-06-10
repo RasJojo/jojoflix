@@ -186,11 +186,19 @@ async function runFfprobe(url: string): Promise<any> {
     ]
     const proc = spawn('ffprobe', args)
     let out = ''
+    const MAX_PROBE_OUTPUT = 10_000_000 // 10 MB — guard against OOM on complex files
     const timer = setTimeout(() => {
       proc.kill('SIGKILL')
       reject(new Error('ffprobe timeout'))
     }, 8_000)
-    proc.stdout.on('data', (d: Buffer) => (out += d.toString()))
+    proc.stdout.on('data', (d: Buffer) => {
+      if (out.length >= MAX_PROBE_OUTPUT) {
+        proc.kill('SIGKILL')
+        reject(new Error('ffprobe output exceeded size limit'))
+        return
+      }
+      out += d.toString()
+    })
     proc.on('close', (code) => {
       clearTimeout(timer)
       if (code !== 0 || !out) return reject(new Error('ffprobe failed'))

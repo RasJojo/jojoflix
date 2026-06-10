@@ -186,6 +186,13 @@ export default class SubtitlesController {
    */
   async download(ctx: HttpContext) {
     const { request, response } = ctx
+    const userId = await this.resolveUserId(ctx)
+    if (!userId) {
+      return response.unauthorized({
+        error: { code: 'AUTH_INVALID', message: 'Non authentifié', status: 401 },
+      })
+    }
+
     const fileId = String(request.input('file_id') ?? '').trim()
     const language = request.input('language', 'fr')
 
@@ -201,6 +208,8 @@ export default class SubtitlesController {
         .toLowerCase()
         .replace(/[^a-z0-9-]/g, '')
       const proxyId = crypto.createHash('md5').update(`${fileId}:${normalizedLang}`).digest('hex')
+      // Bind this proxyId to the requesting user so serveVtt() can enforce ownership.
+      await cache.set(`vtt:owner:${proxyId}`, userId, CACHE_TTL.SUBTITLES)
 
       let vttContent: string
 
@@ -356,8 +365,10 @@ export default class SubtitlesController {
     const match = fileId.match(/^embedded:([a-f0-9]{16}):(\d+)$/i)
     if (!match) return null
 
+    const MAX_EMBEDDED_TRACK_INDEX = 100
     const trackIndex = Number(match[2])
     if (!Number.isInteger(trackIndex) || trackIndex < 0) return null
+    if (trackIndex > MAX_EMBEDDED_TRACK_INDEX) return null
     return { fingerprint: match[1].toLowerCase(), trackIndex }
   }
 
@@ -463,13 +474,23 @@ export default class SubtitlesController {
   async serveVtt(ctx: HttpContext) {
     const { params, response } = ctx
     // Supporte Bearer ou ?token= pour le fetch direct du player (media_kit).
-    if (!(await this.resolveUserId(ctx))) {
+    const userId = await this.resolveUserId(ctx)
+    if (!userId) {
       return response.unauthorized({
         error: { code: 'AUTH_INVALID', message: 'Non authentifié', status: 401 },
       })
     }
 
     const cache = new CacheWrapper()
+
+    // Enforce ownership: the proxyId must have been created by this user.
+    const ownerId = await cache.get<string>(`vtt:owner:${params.id}`)
+    if (!ownerId || ownerId !== userId) {
+      return response.forbidden({
+        error: { code: 'FORBIDDEN', message: 'Accès refusé', status: 403 },
+      })
+    }
+
     const cacheKey = `vtt:raw:${params.id}`
 
     const cached = await cache.get<string>(cacheKey)
@@ -675,7 +696,7 @@ export default class SubtitlesController {
           stream.destroy(new Error(`Subtitle response exceeds ${MAX_SUBTITLE_BYTES} bytes`))
           return
         }
-        chunks.push(chunk)
+        chunks.push(chunk) // Only push if within limits
       })
       stream.on('end', resolve)
       stream.on('error', reject)

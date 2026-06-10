@@ -114,6 +114,11 @@ export default class StreamRegistry {
     } else if (existing?.session) {
       entry.session = existing.session
     }
+    // Atomicity note: Node.js is single-threaded, so Map reads/writes here are
+    // never truly concurrent. The real protection against stale state is the
+    // invalidate() tombstone (streamId === '__invalidated__') combined with the
+    // __invalidated__ check in getActiveUrl(), which guarantees callers see null
+    // until a complete register() with a real URL has run.
     store.set(userId, entry)
   }
 
@@ -126,6 +131,8 @@ export default class StreamRegistry {
   async getActiveUrl(userId: string): Promise<string | null> {
     const entry = store.get(userId)
     if (!entry || isExpired(entry)) return null
+    // Tombstone set by invalidate() — no active URL until a full register() is done.
+    if (entry.streamId === '__invalidated__') return null
     return entry.directUrl ?? null
   }
 
