@@ -41,7 +41,7 @@ class MainScaffold extends StatelessWidget {
     (
       icon: Icons.download_outlined,
       activeIcon: Icons.download,
-      label: 'Hors-ligne',
+      label: 'Téléchargements',
       route: '/downloads'
     ),
     (
@@ -98,6 +98,7 @@ class MainScaffold extends StatelessWidget {
       body: child,
       bottomNavigationBar: NavigationBar(
         selectedIndex: _mobileIndex(),
+        labelBehavior: NavigationDestinationLabelBehavior.alwaysHide,
         onDestinationSelected: (i) =>
             context.go(_mobileDestinations[i].route),
         destinations: _mobileDestinations
