@@ -185,6 +185,8 @@ async function runFfprobe(url: string): Promise<any> {
       url,
     ]
     const proc = spawn('ffprobe', args)
+    // Drain stderr so the OS pipe buffer never fills and blocks the process.
+    proc.stderr.resume()
     let out = ''
     // BUG #8 fix: guard against double-reject when the size-limit kill path fires.
     // The 'close' event always fires after kill(), so without this flag the promise
