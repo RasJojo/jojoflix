@@ -472,11 +472,13 @@ export default class SubsourceService {
       const fileName = zipBuffer.slice(offset + 30, offset + 30 + fnLen).toString('utf-8').toLowerCase()
       const dataOffset = offset + 30 + fnLen + extraLen
 
-      // When a non-matching entry is OOB, skip forward past its header instead of
-      // jumping to dataOffset+compressedSize (which could be past the buffer end,
-      // silently skipping all remaining valid entries).
+      // When a non-matching entry is OOB, skip forward safely.  If dataOffset
+      // itself is past the buffer (e.g. extraLen was crafted very large), jumping
+      // to it would exit the loop and silently skip all remaining valid entries.
+      // Instead, advance by the minimum local-file-header size so the scanner
+      // stays inside the buffer.
       if (dataOffset + compressedSize > zipBuffer.length) {
-        offset = dataOffset
+        offset = dataOffset < zipBuffer.length ? dataOffset : offset + 30
         continue
       }
 

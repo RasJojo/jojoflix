@@ -123,12 +123,14 @@ export default class StreamRegistry {
   }
 
   async getActive(userId: string): Promise<string | null> {
+    prune()
     const entry = store.get(userId)
     if (!entry || isExpired(entry)) return null
     return entry.streamId
   }
 
   async getActiveUrl(userId: string): Promise<string | null> {
+    prune()
     const entry = store.get(userId)
     if (!entry || isExpired(entry)) return null
     // Tombstone set by invalidate() — no active URL until a full register() is done.
@@ -137,6 +139,7 @@ export default class StreamRegistry {
   }
 
   async getUrlByStream(userId: string, streamId: string): Promise<string | null> {
+    prune()
     const entry = store.get(userId)
     if (!entry || isExpired(entry) || entry.streamId !== streamId) return null
     return entry.directUrl ?? null
