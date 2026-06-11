@@ -374,7 +374,7 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
 
   Future<void> loadSubtitle(
     String url, {
-    Duration timeout = const Duration(seconds: 6),
+    Duration timeout = const Duration(seconds: 45),
   }) async {
     _externalSubtitleLabel = 'OpenSubtitles Pro';
     _externalSubtitleLanguage = '';
@@ -1260,7 +1260,7 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
       url,
       options: Options(
         responseType: ResponseType.plain,
-        sendTimeout: timeout,
+        sendTimeout: const Duration(seconds: 10),
         receiveTimeout: timeout,
       ),
     );

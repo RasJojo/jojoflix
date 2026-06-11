@@ -98,6 +98,7 @@ class MainScaffold extends StatelessWidget {
       body: child,
       bottomNavigationBar: NavigationBar(
         selectedIndex: _mobileIndex(),
+        labelBehavior: NavigationDestinationLabelBehavior.alwaysHide,
         onDestinationSelected: (i) =>
             context.go(_mobileDestinations[i].route),
         destinations: _mobileDestinations

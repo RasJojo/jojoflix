@@ -145,7 +145,7 @@ class SubtitleRepository {
   Future<String> downloadSubtitle(
     String fileId,
     String language, {
-    Duration timeout = const Duration(seconds: 6),
+    Duration timeout = const Duration(seconds: 45),
   }) async {
     final response = await apiClient.dio.post(
       '/api/subtitles/download',
@@ -154,7 +154,7 @@ class SubtitleRepository {
         'language': language,
       },
       options: Options(
-        sendTimeout: timeout,
+        sendTimeout: const Duration(seconds: 10),
         receiveTimeout: timeout,
       ),
     );
