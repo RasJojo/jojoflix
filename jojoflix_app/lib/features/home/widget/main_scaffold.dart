@@ -41,7 +41,7 @@ class MainScaffold extends StatelessWidget {
     (
       icon: Icons.download_outlined,
       activeIcon: Icons.download,
-      label: 'Téléchargements',
+      label: 'Hors-ligne',
       route: '/downloads'
     ),
     (
