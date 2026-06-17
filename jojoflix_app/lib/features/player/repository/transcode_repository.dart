@@ -176,8 +176,12 @@ class TranscodeRepository {
 
   /// Retourne l'URL absolue du stream transcoder avec la piste audio sélectionnée.
   /// Le player doit recharger cette URL (avec le token Bearer en header).
-  String getTranscodeAudioPath(int trackIndex) {
-    return '/api/transcode/audio?track=$trackIndex';
+  String getTranscodeAudioPath(int trackIndex, {String? streamId}) {
+    final query = <String, dynamic>{'track': trackIndex};
+    if (streamId != null && streamId.isNotEmpty) {
+      query['stream_id'] = streamId;
+    }
+    return Uri(path: '/api/transcode/audio', queryParameters: query).toString();
   }
 
   Future<String> getSubtitleTrackVtt(

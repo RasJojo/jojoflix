@@ -125,10 +125,12 @@ class SubtitleRepository {
     String tmdbId, {
     int? season,
     int? episode,
+    String? streamId,
   }) async {
     final params = <String, dynamic>{};
     if (season != null) params['season'] = season;
     if (episode != null) params['episode'] = episode;
+    if (streamId != null && streamId.isNotEmpty) params['stream_id'] = streamId;
 
     final response = await apiClient.dio.get(
       '/api/subtitles/list/$tmdbId',
@@ -145,14 +147,20 @@ class SubtitleRepository {
   Future<String> downloadSubtitle(
     String fileId,
     String language, {
+    String? streamId,
     Duration timeout = const Duration(seconds: 45),
   }) async {
+    final data = <String, dynamic>{
+      'file_id': fileId,
+      'language': language,
+    };
+    if (streamId != null && streamId.isNotEmpty) {
+      data['stream_id'] = streamId;
+    }
+
     final response = await apiClient.dio.post(
       '/api/subtitles/download',
-      data: {
-        'file_id': fileId,
-        'language': language,
-      },
+      data: data,
       options: Options(
         sendTimeout: const Duration(seconds: 10),
         receiveTimeout: timeout,

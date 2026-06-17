@@ -102,6 +102,7 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
   String? _profileId;
   int? _season;
   int? _episode;
+  String? _streamId;
 
   int _subtitleDelayMs = 0;
   double _subtitleScale = 1.0;
@@ -134,6 +135,7 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
 
   bool get hasController => true;
   VideoController get videoController => _videoController;
+  String? get activeStreamId => _streamId;
 
   int get subtitleDelayMs => _subtitleDelayMs;
   double get subtitleScale => _subtitleScale;
@@ -212,6 +214,12 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
     _season = season;
     _episode = episode;
     _sourceKey = sourceKey;
+    _streamId = _newStreamId(
+      tmdbId: tmdbId,
+      mediaType: mediaType,
+      season: season,
+      episode: episode,
+    );
     _externalSubtitleOriginalVtt = null;
     _externalSubtitleLabel = null;
     _externalSubtitleLanguage = null;
@@ -248,6 +256,7 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
       profileId: _profileId,
       sourceKey: sourceKey,
       token: _authToken,
+      streamId: _streamId,
     );
     await _reopenFromPath(streamPath, resumeAtSeconds: startPosition);
     _startProgressSync();
@@ -260,6 +269,7 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
     _tmdbId ??= 'offline';
     _mediaType ??= 'offline';
     _sourceKey = null;
+    _streamId = null;
     _externalSubtitleOriginalVtt = null;
     _externalSubtitleLabel = null;
     _externalSubtitleLanguage = null;
@@ -511,7 +521,7 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
         : '';
     final vtt = await ref
         .read(transcodeRepositoryProvider)
-        .getSubtitleTrackVtt(track.id);
+        .getSubtitleTrackVtt(track.id, streamId: _streamId);
 
     if (vtt.trim().isEmpty) {
       throw StateError('EMPTY_EMBEDDED_SUBTITLE');
@@ -859,6 +869,7 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
         profileId: _profileId,
         sourceKey: keepPinnedSource ? _sourceKey : null,
         token: _authToken,
+        streamId: _streamId,
       );
 
       if (!keepPinnedSource) {
@@ -1282,6 +1293,7 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
     String? profileId,
     String? sourceKey,
     String? token,
+    String? streamId,
   }) {
     String path;
     if (mediaType == 'tv' && season != null && episode != null) {
@@ -1300,9 +1312,26 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
     if (token != null && token.isNotEmpty) {
       queryParams['token'] = token;
     }
+    if (streamId != null && streamId.isNotEmpty) {
+      queryParams['stream_id'] = streamId;
+    }
 
     if (queryParams.isEmpty) return path;
     return '$path?${Uri(queryParameters: queryParams).query}';
+  }
+
+  String _newStreamId({
+    required String tmdbId,
+    required String mediaType,
+    int? season,
+    int? episode,
+  }) {
+    final timestamp = DateTime.now().microsecondsSinceEpoch;
+    final media = mediaType.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '');
+    final id = tmdbId.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '');
+    final suffix =
+        season != null && episode != null ? '-s$season-e$episode' : '';
+    return '$media-$id$suffix-$timestamp';
   }
 
   void _startProgressSync() {
