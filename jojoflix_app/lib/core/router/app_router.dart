@@ -176,6 +176,14 @@ GoRouter appRouter(Ref ref) {
             return '';
           }
 
+          String? readString(String key) {
+            final fromQuery = query[key];
+            if (fromQuery != null && fromQuery.isNotEmpty) return fromQuery;
+            final value = extra[key];
+            if (value is String && value.isNotEmpty) return value;
+            return null;
+          }
+
           return PlayerScreen(
             tmdbId: tmdbId,
             mediaType: mediaType,
@@ -187,6 +195,7 @@ GoRouter appRouter(Ref ref) {
             subtitle: extra['subtitle'] as String?,
             artworkUrl: extra['artworkUrl'] as String?,
             localVideoPath: extra['localVideoPath'] as String?,
+            initialSourceKey: readString('sourceKey'),
             localSubtitles: (extra['localSubtitles'] as List?)
                     ?.whereType<Map>()
                     .map((item) => Map<String, dynamic>.from(item))

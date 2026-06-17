@@ -75,6 +75,27 @@ class TorrentSource {
   }
 }
 
+class PrewarmResult {
+  final bool warmed;
+  final bool sourceReady;
+  final String? sourceKey;
+
+  const PrewarmResult({
+    required this.warmed,
+    required this.sourceReady,
+    this.sourceKey,
+  });
+
+  factory PrewarmResult.fromJson(Map<String, dynamic> json) {
+    final sourceKey = json['source_key']?.toString();
+    return PrewarmResult(
+      warmed: json['warmed'] == true,
+      sourceReady: json['source_ready'] == true || json['warmed'] == true,
+      sourceKey: sourceKey != null && sourceKey.isNotEmpty ? sourceKey : null,
+    );
+  }
+}
+
 class SourceRepository {
   final ApiClient apiClient;
   SourceRepository({required this.apiClient});
@@ -119,7 +140,7 @@ class SourceRepository {
     return '/api/stream/movie/$tmdbId';
   }
 
-  Future<void> prewarmNextEpisode(
+  Future<PrewarmResult> prewarmNextEpisode(
     String tmdbId,
     int season,
     int episode, {
@@ -130,14 +151,16 @@ class SourceRepository {
       query['source_key'] = sourceKey;
     }
 
-    await apiClient.dio.get(
+    final response = await apiClient.dio.get(
       '/api/stream/prewarm/tv/$tmdbId/s/$season/e/$episode',
       queryParameters: query.isEmpty ? null : query,
       options: Options(
-        sendTimeout: const Duration(seconds: 2),
-        receiveTimeout: const Duration(seconds: 3),
+        sendTimeout: const Duration(seconds: 5),
+        receiveTimeout: const Duration(seconds: 30),
       ),
     );
+    final data = response.data['data'] as Map<String, dynamic>? ?? const {};
+    return PrewarmResult.fromJson(data);
   }
 }
 // Sources

@@ -27,6 +27,7 @@ class PlayerScreen extends ConsumerStatefulWidget {
   final String? subtitle;
   final String? artworkUrl;
   final String? localVideoPath;
+  final String? initialSourceKey;
   final List<Map<String, dynamic>> localSubtitles;
 
   const PlayerScreen({
@@ -41,6 +42,7 @@ class PlayerScreen extends ConsumerStatefulWidget {
     this.subtitle,
     this.artworkUrl,
     this.localVideoPath,
+    this.initialSourceKey,
     this.localSubtitles = const [],
   });
 
@@ -66,6 +68,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   List<MediaMarker> _markers = const [];
 
   String? _activeSourceKey;
+  String? _prewarmedNextEpisodeSourceKey;
+  int? _prewarmedNextEpisodeSeason;
+  int? _prewarmedNextEpisodeNumber;
   final Set<String> _exhaustedSourceKeys = {};
   // Clé utilisée dans le sélecteur de sous-titres pour afficher la sélection active.
   String _subtitleSelectionKey = 'off';
@@ -108,7 +113,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         oldWidget.profileId != widget.profileId ||
         oldWidget.season != widget.season ||
         oldWidget.episode != widget.episode ||
-        oldWidget.startPosition != widget.startPosition;
+        oldWidget.startPosition != widget.startPosition ||
+        oldWidget.initialSourceKey != widget.initialSourceKey;
 
     if (!shouldReload) {
       if (metadataChanged) {
@@ -124,6 +130,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         _openSubtitles = const [];
         _markers = const [];
         _activeSourceKey = null;
+        _prewarmedNextEpisodeSourceKey = null;
+        _prewarmedNextEpisodeSeason = null;
+        _prewarmedNextEpisodeNumber = null;
         _fatalError = null;
         _subtitleSelectionKey = 'off';
         _skipIntroHandled = false;
@@ -190,7 +199,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         return;
       }
 
-      await _restorePreferredSource();
+      final initialSourceKey = widget.initialSourceKey?.trim();
+      if (initialSourceKey != null && initialSourceKey.isNotEmpty) {
+        _activeSourceKey = initialSourceKey;
+      } else {
+        await _restorePreferredSource();
+      }
 
       // Si on a une source préférée sauvegardée, la sonder avant de l'utiliser.
       // Un lien RD expiré ou une source morte est détecté ici, avant que le
@@ -355,10 +369,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
     try {
       final repo = ref.read(subtitleRepositoryProvider);
+      final streamId =
+          ref.read(videoPlayerNotifierProvider.notifier).activeStreamId;
       final items = await repo.listSubtitles(
         widget.tmdbId,
         season: widget.season,
         episode: widget.episode,
+        streamId: streamId,
       );
       items.sort((a, b) {
         final byPriority = _subtitleLanguageRank(a.language) -
@@ -786,16 +803,31 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   Future<void> _goToEpisode(int episodeNumber) async {
     if (!mounted || widget.mediaType != 'tv' || widget.season == null) return;
     _stopAutoNextTimer(resetCountdown: true, resetCancellation: true);
+    final queryParameters = <String, String>{
+      'profileId': widget.profileId,
+      'season': widget.season!.toString(),
+      'episode': episodeNumber.toString(),
+      'startPosition': '0',
+    };
+    final prewarmedSourceKey =
+        _prewarmedSourceKeyFor(widget.season!, episodeNumber);
+    final nextSourceKey = prewarmedSourceKey ?? _activeSourceKey;
+    if (nextSourceKey != null && nextSourceKey.isNotEmpty) {
+      queryParameters['sourceKey'] = nextSourceKey;
+    }
     final location = Uri(
       path: '/player/${widget.mediaType}/${widget.tmdbId}',
-      queryParameters: {
-        'profileId': widget.profileId,
-        'season': widget.season!.toString(),
-        'episode': episodeNumber.toString(),
-        'startPosition': '0',
-      },
+      queryParameters: queryParameters,
     ).toString();
     context.go(location);
+  }
+
+  String? _prewarmedSourceKeyFor(int season, int episode) {
+    if (_prewarmedNextEpisodeSeason != season ||
+        _prewarmedNextEpisodeNumber != episode) {
+      return null;
+    }
+    return _prewarmedNextEpisodeSourceKey;
   }
 
   Future<void> _openSourceSelector() async {
@@ -1142,12 +1174,22 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       return;
     }
     try {
-      await ref.read(sourceRepositoryProvider).prewarmNextEpisode(
-            widget.tmdbId,
-            widget.season!,
-            widget.episode! + 1,
-            sourceKey: preferredSourceKey,
-          );
+      final targetSeason = widget.season!;
+      final targetEpisode = widget.episode! + 1;
+      final result =
+          await ref.read(sourceRepositoryProvider).prewarmNextEpisode(
+                widget.tmdbId,
+                targetSeason,
+                targetEpisode,
+                sourceKey: preferredSourceKey,
+              );
+      final sourceKey = result.sourceKey;
+      if (!mounted || sourceKey == null || sourceKey.isEmpty) return;
+      setState(() {
+        _prewarmedNextEpisodeSourceKey = sourceKey;
+        _prewarmedNextEpisodeSeason = targetSeason;
+        _prewarmedNextEpisodeNumber = targetEpisode;
+      });
     } catch (_) {
       // Best-effort: ne bloque jamais le playback courant.
     }
@@ -1367,8 +1409,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       for (final track in tracks) track.id: track.label,
     };
     try {
-      final infos =
-          await ref.read(transcodeRepositoryProvider).getAudioTracks();
+      final streamId =
+          ref.read(videoPlayerNotifierProvider.notifier).activeStreamId;
+      final infos = await ref
+          .read(transcodeRepositoryProvider)
+          .getAudioTracks(streamId: streamId);
       for (final info in infos) {
         final id = info.index;
         if (!labels.containsKey(id)) continue;
@@ -1542,6 +1587,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         final subtitleUrl = await repo.downloadSubtitle(
           entry.fileId,
           entry.language,
+          streamId: playerNotifier.activeStreamId,
           timeout: downloadTimeout,
         );
         if (!mounted) break;

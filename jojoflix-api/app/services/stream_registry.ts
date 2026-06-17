@@ -47,6 +47,7 @@ export interface RegisterStreamSessionInput {
 }
 
 interface StreamEntry {
+  userId: string
   streamId: string
   directUrl?: string
   session?: ActiveStreamSession
@@ -55,6 +56,7 @@ interface StreamEntry {
 
 // Singleton in-memory store — survives for the process lifetime.
 const store = new Map<string, StreamEntry>()
+const latestStreamByUser = new Map<string, string>()
 
 const ACTIVE_WINDOW_SECONDS = (() => {
   const raw = Number(process.env.MONITOR_ACTIVE_STREAM_WINDOW_SECONDS ?? 20)
@@ -66,9 +68,18 @@ function isExpired(entry: StreamEntry): boolean {
   return Date.now() > entry.expiresAt
 }
 
+function streamKey(userId: string, streamId: string): string {
+  return `${userId}\u0000${streamId}`
+}
+
 function prune(): void {
-  for (const [userId, entry] of store) {
-    if (isExpired(entry)) store.delete(userId)
+  for (const [key, entry] of store) {
+    if (isExpired(entry)) {
+      store.delete(key)
+      if (latestStreamByUser.get(entry.userId) === entry.streamId) {
+        latestStreamByUser.delete(entry.userId)
+      }
+    }
   }
 }
 
@@ -81,8 +92,10 @@ export default class StreamRegistry {
   ): Promise<void> {
     prune()
     const now = new Date().toISOString()
-    const existing = store.get(userId)
+    const key = streamKey(userId, streamId)
+    const existing = store.get(key)
     const entry: StreamEntry = {
+      userId,
       streamId,
       directUrl: directUrl ?? existing?.directUrl,
       expiresAt: Date.now() + STREAM_TTL_MS,
@@ -114,24 +127,26 @@ export default class StreamRegistry {
     } else if (existing?.session) {
       entry.session = existing.session
     }
-    // Atomicity note: Node.js is single-threaded, so Map reads/writes here are
-    // never truly concurrent. The real protection against stale state is the
-    // invalidate() tombstone (streamId === '__invalidated__') combined with the
-    // __invalidated__ check in getActiveUrl(), which guarantees callers see null
-    // until a complete register() with a real URL has run.
-    store.set(userId, entry)
+    store.set(key, entry)
+    if (streamId !== '__invalidated__') {
+      latestStreamByUser.set(userId, streamId)
+    }
   }
 
   async getActive(userId: string): Promise<string | null> {
     prune()
-    const entry = store.get(userId)
+    const streamId = latestStreamByUser.get(userId)
+    if (!streamId) return null
+    const entry = store.get(streamKey(userId, streamId))
     if (!entry || isExpired(entry)) return null
     return entry.streamId
   }
 
   async getActiveUrl(userId: string): Promise<string | null> {
     prune()
-    const entry = store.get(userId)
+    const streamId = latestStreamByUser.get(userId)
+    if (!streamId) return null
+    const entry = store.get(streamKey(userId, streamId))
     if (!entry || isExpired(entry)) return null
     // Tombstone set by invalidate() — no active URL until a full register() is done.
     if (entry.streamId === '__invalidated__') return null
@@ -140,7 +155,7 @@ export default class StreamRegistry {
 
   async getUrlByStream(userId: string, streamId: string): Promise<string | null> {
     prune()
-    const entry = store.get(userId)
+    const entry = store.get(streamKey(userId, streamId))
     if (!entry || isExpired(entry) || entry.streamId !== streamId) return null
     return entry.directUrl ?? null
   }
@@ -162,7 +177,7 @@ export default class StreamRegistry {
       >
     >
   ): Promise<void> {
-    const entry = store.get(userId)
+    const entry = store.get(streamKey(userId, streamId))
     if (!entry || isExpired(entry) || entry.streamId !== streamId || !entry.session) return
     entry.session = {
       ...entry.session,
@@ -189,12 +204,17 @@ export default class StreamRegistry {
   }
 
   async endSession(userId: string, streamId: string): Promise<void> {
-    const entry = store.get(userId)
-    if (entry && entry.streamId === streamId) store.delete(userId)
+    store.delete(streamKey(userId, streamId))
+    if (latestStreamByUser.get(userId) === streamId) {
+      latestStreamByUser.delete(userId)
+    }
   }
 
   async clear(userId: string): Promise<void> {
-    store.delete(userId)
+    for (const [key, entry] of store) {
+      if (entry.userId === userId) store.delete(key)
+    }
+    latestStreamByUser.delete(userId)
   }
 
   /**
@@ -206,14 +226,19 @@ export default class StreamRegistry {
     prune()
     const streamId = '__invalidated__'
     const entry: StreamEntry = {
+      userId,
       streamId,
       expiresAt: Date.now() + STREAM_TTL_MS,
     }
-    store.set(userId, entry)
+    store.set(streamKey(userId, streamId), entry)
+    latestStreamByUser.set(userId, streamId)
   }
 
   async hasActiveStream(userId: string): Promise<boolean> {
-    const entry = store.get(userId)
-    return !!entry && !isExpired(entry)
+    prune()
+    for (const entry of store.values()) {
+      if (entry.userId === userId && !isExpired(entry)) return true
+    }
+    return false
   }
 }

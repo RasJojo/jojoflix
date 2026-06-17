@@ -2,6 +2,7 @@ import type { HttpContext } from '@adonisjs/core/http'
 import TorrentScoringService, { type TorrentSource } from '#services/torrent_scoring_service'
 import RealDebridService from '#services/real_debrid_service'
 import StreamRegistry from '#services/stream_registry'
+import CacheWrapper, { CACHE_TTL } from '#services/cache_wrapper'
 import { auth as betterAuth } from '#services/better_auth'
 import crypto from 'node:crypto'
 import got from 'got'
@@ -13,12 +14,14 @@ export default class StreamingController {
   private readonly scoring: TorrentScoringService
   private readonly rd: RealDebridService
   private readonly registry: StreamRegistry
+  private readonly cache: CacheWrapper
   private readonly torProxyAgent?: SocksProxyAgent
 
   constructor() {
     this.scoring = new TorrentScoringService()
     this.rd = new RealDebridService()
     this.registry = new StreamRegistry()
+    this.cache = new CacheWrapper()
     const torrentioProxy = env.get('TORRENTIO_PROXY')
     this.torProxyAgent = torrentioProxy ? new SocksProxyAgent(torrentioProxy) : undefined
   }
@@ -36,6 +39,20 @@ export default class StreamingController {
     const magnet = request.input('magnet') as string | undefined
 
     try {
+      const reusableDirectUrl = await this.getReusableDirectUrl(userId, request)
+      if (reusableDirectUrl) {
+        const started = await this.proxyStream(
+          userId,
+          reusableDirectUrl,
+          request,
+          response,
+          sourceKey ?? 'active-stream',
+          sourceKey ?? 'active-stream',
+          { tmdbId, mediaType: 'movie' }
+        )
+        if (started) return
+      }
+
       const source = await this.resolveSource(tmdbId, 'movie', sourceKey, magnet)
       return this.streamWithFallback({
         userId,
@@ -70,6 +87,20 @@ export default class StreamingController {
     const magnet = request.input('magnet') as string | undefined
 
     try {
+      const reusableDirectUrl = await this.getReusableDirectUrl(userId, request)
+      if (reusableDirectUrl) {
+        const started = await this.proxyStream(
+          userId,
+          reusableDirectUrl,
+          request,
+          response,
+          sourceKey ?? 'active-stream',
+          sourceKey ?? 'active-stream',
+          { tmdbId, mediaType: 'tv', season, episode }
+        )
+        if (started) return
+      }
+
       const source = await this.resolveSource(tmdbId, 'tv', sourceKey, magnet, season, episode)
       return this.streamWithFallback({
         userId,
@@ -107,15 +138,30 @@ export default class StreamingController {
 
     try {
       const source = await this.resolveSource(tmdbId, 'tv', sourceKey, undefined, season, episode)
-      return response.ok({ data: { warmed: true, source_key: source.key } })
-    } catch {
+      let directReady = false
+      try {
+        await this.resolveDirectUrl(source, 'tv', season, episode, {
+          timeoutMs: 25_000,
+          maxRdAttempts: 12,
+        })
+        directReady = true
+      } catch (error) {
+        console.warn(
+          `[stream:prewarm] direct-url failed tmdb=${tmdbId} s=${season} e=${episode} key=${source.key} error=${error instanceof Error ? error.message : String(error)}`
+        )
+      }
+      return response.ok({
+        data: { warmed: directReady, source_ready: true, source_key: source.key },
+      })
+    } catch (error) {
+      console.warn(
+        `[stream:prewarm] source failed tmdb=${tmdbId} s=${season} e=${episode} error=${error instanceof Error ? error.message : String(error)}`
+      )
       return response.ok({ data: { warmed: false } })
     }
   }
 
-  private async resolveUserId(
-    ctx: HttpContext
-  ): Promise<string | null> {
+  private async resolveUserId(ctx: HttpContext): Promise<string | null> {
     if (ctx.betterAuthUser) return ctx.betterAuthUser.id
 
     const authHeader = ctx.request.header('authorization') ?? ctx.request.header('Authorization')
@@ -215,6 +261,15 @@ export default class StreamingController {
     return best
   }
 
+  private async getReusableDirectUrl(
+    userId: string,
+    request: HttpContext['request']
+  ): Promise<string | null> {
+    const requestedStreamId = this.normalizeStreamId(request.input('stream_id'))
+    if (!requestedStreamId) return null
+    return this.registry.getUrlByStream(userId, requestedStreamId)
+  }
+
   private async streamWithFallback(params: {
     userId: string
     tmdbId: string
@@ -225,7 +280,17 @@ export default class StreamingController {
     season?: number
     episode?: number
   }) {
-    const {
+    const { userId, tmdbId, mediaType, season, episode, preferredSource, request, response } =
+      params
+
+    const candidates = await this.getSourceFallbackCandidates(
+      tmdbId,
+      mediaType,
+      preferredSource,
+      season,
+      episode
+    )
+    const streamed = await this.trySources(candidates, {
       userId,
       tmdbId,
       mediaType,
@@ -234,21 +299,39 @@ export default class StreamingController {
       preferredSource,
       request,
       response,
-    } = params
-
-    const candidates = await this.getSourceFallbackCandidates(tmdbId, mediaType, preferredSource, season, episode)
-    const streamed = await this.trySources(candidates, { userId, tmdbId, mediaType, preferredSource, request, response })
+    })
 
     if (!streamed) {
       // Toutes les URLs directes ont échoué (probablement expirées). Force-refresh et retente.
-      console.info(`[stream:refresh] all sources failed, force-refreshing tmdb=${tmdbId} type=${mediaType} s=${season ?? '-'} e=${episode ?? '-'}`)
-      const refreshed = await this.getSourceFallbackCandidates(tmdbId, mediaType, preferredSource, season, episode, true)
-      const streamedAfterRefresh = await this.trySources(refreshed, { userId, tmdbId, mediaType, preferredSource, request, response, afterRefresh: true })
+      console.info(
+        `[stream:refresh] all sources failed, force-refreshing tmdb=${tmdbId} type=${mediaType} s=${season ?? '-'} e=${episode ?? '-'}`
+      )
+      const refreshed = await this.getSourceFallbackCandidates(
+        tmdbId,
+        mediaType,
+        preferredSource,
+        season,
+        episode,
+        true
+      )
+      const streamedAfterRefresh = await this.trySources(refreshed, {
+        userId,
+        tmdbId,
+        mediaType,
+        season,
+        episode,
+        preferredSource,
+        request,
+        response,
+        afterRefresh: true,
+      })
 
       if (!streamedAfterRefresh) {
         // Purge le cache : toutes les sources (fraîchement récupérées) ont échoué.
         // La prochaine tentative de l'utilisateur repartira de zéro depuis les providers.
-        console.info(`[stream:invalidate] purging stale cache tmdb=${tmdbId} type=${mediaType} s=${season ?? '-'} e=${episode ?? '-'}`)
+        console.info(
+          `[stream:invalidate] purging stale cache tmdb=${tmdbId} type=${mediaType} s=${season ?? '-'} e=${episode ?? '-'}`
+        )
         await this.scoring.invalidateSources(tmdbId, mediaType, season, episode)
         return response.status(502).json({
           error: {
@@ -267,26 +350,43 @@ export default class StreamingController {
       userId: string
       tmdbId: string
       mediaType: 'movie' | 'tv'
+      season?: number
+      episode?: number
       preferredSource: TorrentSource
       request: HttpContext['request']
       response: HttpContext['response']
       afterRefresh?: boolean
     }
   ): Promise<boolean> {
-    const { userId, tmdbId, mediaType, preferredSource, request, response, afterRefresh } = params
+    const {
+      userId,
+      tmdbId,
+      mediaType,
+      season,
+      episode,
+      preferredSource,
+      request,
+      response,
+      afterRefresh,
+    } = params
 
     if (allSources.length === 0) return false
 
-    const deadline = Date.now() + 60_000
-    const maxSourcesToTry = 15
+    const deadline = Date.now() + (afterRefresh ? 25_000 : 30_000)
+    const maxSourcesToTry = afterRefresh ? 6 : 8
 
     for (const source of allSources.slice(0, maxSourcesToTry)) {
       const remainingMs = deadline - Date.now()
       if (remainingMs <= 0) break
 
       try {
-        console.info(`[stream:resolve] provider=${source.provider} key=${source.key} has_direct_url=${source.has_direct_url}`)
-        const directUrl = await this.resolveDirectUrl(source)
+        console.info(
+          `[stream:resolve] provider=${source.provider} key=${source.key} has_direct_url=${source.has_direct_url}`
+        )
+        const directUrl = await this.resolveDirectUrl(source, mediaType, season, episode, {
+          timeoutMs: Math.min(remainingMs, 12_000),
+          maxRdAttempts: 7,
+        })
         console.info(`[stream:resolved] url=${directUrl.substring(0, 80)}`)
 
         if (source.key !== preferredSource.key) {
@@ -295,11 +395,27 @@ export default class StreamingController {
           )
         }
 
-        const started = await this.proxyStream(userId, directUrl, request, response, preferredSource.key, source.key)
+        const started = await this.proxyStream(
+          userId,
+          directUrl,
+          request,
+          response,
+          preferredSource.key,
+          source.key,
+          {
+            tmdbId,
+            mediaType,
+            season,
+            episode,
+            sourceProvider: source.provider,
+          }
+        )
         console.info(`[stream:proxy] started=${started} key=${source.key}`)
         if (started) return true
       } catch (error) {
-        console.warn(`[stream:error] key=${source.key} error=${error instanceof Error ? error.message : String(error)}`)
+        console.warn(
+          `[stream:error] key=${source.key} error=${error instanceof Error ? error.message : String(error)}`
+        )
         if (this.isSourceAvailabilityError(error)) continue
         throw error
       }
@@ -333,7 +449,8 @@ export default class StreamingController {
     const pushUnique = (item?: TorrentSource) => {
       if (!item) return
       const signature =
-        item.key || `${item.provider}|${item.magnet}|${item.direct_url ?? ''}|${item.file_idx ?? 'na'}`
+        item.key ||
+        `${item.provider}|${item.magnet}|${item.direct_url ?? ''}|${item.file_idx ?? 'na'}`
       if (seen.has(signature)) return
       seen.add(signature)
       ordered.push(item)
@@ -357,13 +474,19 @@ export default class StreamingController {
     return [preferred, ...rdPlusSources, ...otherSources]
   }
 
-  private async resolveDirectUrl(source: TorrentSource): Promise<string> {
+  private async resolveDirectUrl(
+    source: TorrentSource,
+    mediaType: 'movie' | 'tv' = 'movie',
+    season?: number,
+    episode?: number,
+    options: { timeoutMs?: number; maxRdAttempts?: number } = {}
+  ): Promise<string> {
     if (source.direct_url) {
       // Torrentio resolve URLs : on les suit via le proxy Tor pour contourner le blocage
       // Cloudflare sur l'IP du VPS. Torrentio gère lui-même l'unrestriction RD et redirige
       // vers l'URL CDN finale — on n'appelle jamais addMagnet/unrestrictLink pour ces URLs.
       if (this.isTorrentioResolveUrl(source.direct_url)) {
-        return this.followTorrentioResolveUrl(source.direct_url)
+        return this.resolveCachedTorrentioUrl(source.direct_url, options.timeoutMs ?? 12_000)
       }
       return source.direct_url
     }
@@ -372,15 +495,27 @@ export default class StreamingController {
       throw new Error('NO_SOURCE_FOUND')
     }
 
-    return this.rd.unrestrictLink(source.magnet, {
+    const resolvePromise = this.rd.unrestrictLink(source.magnet, {
       fileIdx: source.file_idx ?? null,
+      maxAttempts: options.maxRdAttempts,
+      season: mediaType === 'tv' ? (season ?? null) : null,
+      episode: mediaType === 'tv' ? (episode ?? null) : null,
     })
+
+    if (!options.timeoutMs) return resolvePromise
+    return this.withTimeout(
+      resolvePromise,
+      options.timeoutMs,
+      'RD_ERROR: Timeout resolving direct link'
+    )
   }
 
   private isTorrentioResolveUrl(url: string): boolean {
     try {
       const parsed = new URL(url)
-      return parsed.hostname.includes('torrentio.strem.fun') && parsed.pathname.includes('/resolve/')
+      return (
+        parsed.hostname.includes('torrentio.strem.fun') && parsed.pathname.includes('/resolve/')
+      )
     } catch {
       return false
     }
@@ -423,6 +558,37 @@ export default class StreamingController {
     })
   }
 
+  private async resolveCachedTorrentioUrl(url: string, timeoutMs: number): Promise<string> {
+    const cacheKey = `torrentio:resolved:${crypto.createHash('md5').update(url).digest('hex')}`
+    const cached = await this.cache.get<string>(cacheKey)
+    if (cached) return cached
+
+    const resolved = await this.withTimeout(
+      this.followTorrentioResolveUrl(url),
+      timeoutMs,
+      'TORRENTIO_RESOLVE_FAILED: Timeout resolving direct URL'
+    )
+    await this.cache.set(cacheKey, resolved, CACHE_TTL.RD_LINK)
+    return resolved
+  }
+
+  private async withTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    timeoutMessage: string
+  ): Promise<T> {
+    let timer: NodeJS.Timeout | null = null
+    const timeout = new Promise<T>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs)
+    })
+
+    try {
+      return await Promise.race([promise, timeout])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
   private isDramayoCdnUrl(url: string): boolean {
     try {
       const { hostname } = new URL(url)
@@ -452,31 +618,30 @@ export default class StreamingController {
     request: HttpContext['request'],
     response: HttpContext['response'],
     requestedSourceKey: string,
-    selectedSourceKey: string
-  ): Promise<boolean> {
-    // 1. Invalider l'ancien flux de façon atomique (sans URL) pour que
-    //    getActiveUrl() retourne null pendant la fenêtre de résolution.
-    await this.registry.invalidate(userId)
-
-    // 2. Générer le streamId et enregistrer en une seule étape atomique avec l'URL directe.
-    //    De cette façon, getActiveUrl() ne peut jamais retourner null entre le register et l'URL.
-    const streamId = crypto.randomUUID()
-    await this.registry.register(userId, streamId, directUrl)
-
-    // 3. Vérifier que ce flux est toujours actif (pas invalidé entre-temps par un appel concurrent)
-    const activeStreamId = await this.registry.getActive(userId)
-    if (activeStreamId !== streamId) {
-      response.status(499).json({
-        error: {
-          code: 'STREAM_INVALIDATED',
-          message: 'Le flux a été interrompu suite à une déconnexion',
-          status: 499,
-        },
-      })
-      return true // réponse envoyée, ne pas tenter d'autre source
+    selectedSourceKey: string,
+    metadata: {
+      tmdbId: string
+      mediaType: 'movie' | 'tv'
+      season?: number
+      episode?: number
+      sourceProvider?: string
     }
+  ): Promise<boolean> {
+    const requestedStreamId = this.normalizeStreamId(request.input('stream_id'))
+    const streamId = requestedStreamId ?? crypto.randomUUID()
+    await this.registry.register(userId, streamId, directUrl, {
+      profile_id: this.normalizeProfileId(request.input('profile_id')),
+      tmdb_id: metadata.tmdbId,
+      media_type: metadata.mediaType,
+      season: metadata.season ?? null,
+      episode: metadata.episode ?? null,
+      source_key: selectedSourceKey,
+      source_provider: metadata.sourceProvider ?? null,
+      direct_url_host: this.directUrlHost(directUrl),
+      user_agent: request.header('user-agent') ?? null,
+    })
 
-    // 4. Stream proxy (Range + backpressure) : on ne renvoie jamais l'URL RD au client.
+    // Stream proxy (Range + backpressure) : on ne renvoie jamais l'URL RD au client.
     const rangeHeader = request.header('range')
     const proxyHeaders: Record<string, string> = {}
     if (rangeHeader) proxyHeaders['Range'] = rangeHeader
@@ -512,7 +677,9 @@ export default class StreamingController {
         upstream.once('response', (upstreamResponse) => {
           const statusCode = upstreamResponse.statusCode ?? 500
           const finalUrl: string = (upstreamResponse as any).url ?? directUrl
-          console.info(`[stream:upstream] status=${statusCode} finalUrl=${finalUrl.substring(0, 100)}`)
+          console.info(
+            `[stream:upstream] status=${statusCode} finalUrl=${finalUrl.substring(0, 100)}`
+          )
 
           // resolve(false) toujours EN PREMIER pour éviter une race condition :
           // upstream.destroy() peut émettre 'error' de façon synchrone, ce qui appellerait
@@ -555,7 +722,9 @@ export default class StreamingController {
             const finalHost = new URL(finalUrl).hostname
             const inputHost = new URL(directUrl).hostname
             if (finalHost === inputHost && finalUrl !== directUrl) {
-              console.warn(`[stream:upstream] internal error video detected host=${finalHost} path=${new URL(finalUrl).pathname}`)
+              console.warn(
+                `[stream:upstream] internal error video detected host=${finalHost} path=${new URL(finalUrl).pathname}`
+              )
               resolve(false)
               if (!upstream.destroyed) upstream.destroy()
               return
@@ -565,6 +734,7 @@ export default class StreamingController {
           }
 
           response.response.statusCode = statusCode
+          response.header('x-jojoflix-stream-id', streamId)
           response.header('x-jojoflix-requested-source-key', requestedSourceKey)
           response.header('x-jojoflix-selected-source-key', selectedSourceKey)
           response.header(
@@ -624,6 +794,27 @@ export default class StreamingController {
         // Headers already sent — absorb the exception silently
       }
       return true // stream déjà commencé
+    }
+  }
+
+  private normalizeStreamId(value: unknown): string | null {
+    const streamId = String(value ?? '').trim()
+    if (!streamId) return null
+    if (!/^[a-zA-Z0-9._:-]{1,120}$/.test(streamId)) return null
+    return streamId
+  }
+
+  private normalizeProfileId(value: unknown): number | null {
+    const parsed = Number(value)
+    if (!Number.isInteger(parsed) || parsed < 0) return null
+    return parsed
+  }
+
+  private directUrlHost(url: string): string | null {
+    try {
+      return new URL(url).hostname
+    } catch {
+      return null
     }
   }
 }

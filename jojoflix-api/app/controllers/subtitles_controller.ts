@@ -211,7 +211,10 @@ export default class SubtitlesController {
       // Include userId so two different users requesting the same subtitle get
       // separate proxyIds — without this, user B's download() call overwrites
       // vtt:owner for user A's proxyId and user A gets 403 on serveVtt().
-      const proxyId = crypto.createHash('md5').update(`${userId}:${fileId}:${normalizedLang}`).digest('hex')
+      const proxyId = crypto
+        .createHash('md5')
+        .update(`${userId}:${fileId}:${normalizedLang}`)
+        .digest('hex')
       // Bind this proxyId to the requesting user so serveVtt() can enforce ownership.
       await cache.set(`vtt:owner:${proxyId}`, userId, CACHE_TTL.SUBTITLES)
 
@@ -235,7 +238,11 @@ export default class SubtitlesController {
         const detailPath = fileId.slice('subsource:html:'.length)
         if (!/^[a-zA-Z0-9/_-]+$/.test(detailPath)) {
           return response.badRequest({
-            error: { code: 'INVALID_SUBTITLE_PATH', message: 'Chemin de sous-titre invalide', status: 400 },
+            error: {
+              code: 'INVALID_SUBTITLE_PATH',
+              message: 'Chemin de sous-titre invalide',
+              status: 400,
+            },
           })
         }
         const flareSolverrUrl = this.resolveFlareSolverrUrl()
@@ -285,8 +292,14 @@ export default class SubtitlesController {
       // Purger le cache en cas d'échec pour éviter de conserver un VTT vide ou corrompu.
       // BUG #3 fix: also purge vtt:owner so the user can retry instead of being stuck
       // with a 403/404 for the full TTL duration.
-      const failedNormalizedLang = (String(language || 'und').toLowerCase().replace(/[^a-z0-9-]/g, '')) || 'und'
-      const failedProxyId = crypto.createHash('md5').update(`${userId}:${fileId}:${failedNormalizedLang}`).digest('hex')
+      const failedNormalizedLang =
+        String(language || 'und')
+          .toLowerCase()
+          .replace(/[^a-z0-9-]/g, '') || 'und'
+      const failedProxyId = crypto
+        .createHash('md5')
+        .update(`${userId}:${fileId}:${failedNormalizedLang}`)
+        .digest('hex')
       await new CacheWrapper().forget(`vtt:raw:${failedProxyId}`).catch(() => {})
       await new CacheWrapper().forget(`vtt:owner:${failedProxyId}`).catch(() => {})
       await new CacheWrapper().forget(`vtt:url:${failedProxyId}`).catch(() => {})
@@ -320,7 +333,8 @@ export default class SubtitlesController {
       const cache = new CacheWrapper()
       const probeCacheKey = `probe:tracks:${fingerprint}`
 
-      let subtitleTracks: SubtitleTrackInfoPayload[] | null = await cache.get<SubtitleTrackInfoPayload[]>(probeCacheKey)
+      let subtitleTracks: SubtitleTrackInfoPayload[] | null =
+        await cache.get<SubtitleTrackInfoPayload[]>(probeCacheKey)
       if (!subtitleTracks) {
         const info = await probeMediaInfo(directUrl)
         subtitleTracks = info.subtitle_tracks
@@ -390,7 +404,19 @@ export default class SubtitlesController {
   private async resolveActiveDirectUrl(ctx: HttpContext): Promise<string | null> {
     const userId = await this.resolveUserId(ctx)
     if (!userId) return null
+    const requestedStreamId = this.normalizeStreamId(ctx.request.input('stream_id'))
+    if (requestedStreamId) {
+      const directUrl = await this.registry.getUrlByStream(userId, requestedStreamId)
+      if (directUrl) return directUrl
+    }
     return this.registry.getActiveUrl(userId)
+  }
+
+  private normalizeStreamId(value: unknown): string | null {
+    const streamId = String(value ?? '').trim()
+    if (!streamId) return null
+    if (!/^[a-zA-Z0-9._:-]{1,120}$/.test(streamId)) return null
+    return streamId
   }
 
   private streamFingerprint(url: string): string {
@@ -415,7 +441,11 @@ export default class SubtitlesController {
 
   private normalizeEmbeddedLanguage(track: SubtitleTrackInfoPayload): string {
     const raw = `${track.language ?? ''} ${track.title ?? ''}`.trim().toLowerCase()
-    if (/\b(fr|fra|fre|french|français|francais|vostfr|truefrench|vff|vfq|vfi|vfb|vfs)\b/.test(raw) || /\bvo[-_]?fr\b/.test(raw) || /\bfr[-_]fr\b/.test(raw)) {
+    if (
+      /\b(fr|fra|fre|french|français|francais|vostfr|truefrench|vff|vfq|vfi|vfb|vfs)\b/.test(raw) ||
+      /\bvo[-_]?fr\b/.test(raw) ||
+      /\bfr[-_]fr\b/.test(raw)
+    ) {
       return 'fr'
     }
     if (/\b(en|eng|english|anglais)\b/.test(raw)) return 'en'
@@ -601,22 +631,43 @@ export default class SubtitlesController {
 
     if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
       return response.badRequest({
-        error: { code: 'INVALID_TMDB_ID', message: 'tmdb_id doit être un entier positif', status: 400 },
+        error: {
+          code: 'INVALID_TMDB_ID',
+          message: 'tmdb_id doit être un entier positif',
+          status: 400,
+        },
       })
     }
     if (markerType !== 'intro' && markerType !== 'outro') {
       return response.badRequest({
-        error: { code: 'INVALID_MARKER_TYPE', message: "marker_type doit être 'intro' ou 'outro'", status: 400 },
+        error: {
+          code: 'INVALID_MARKER_TYPE',
+          message: "marker_type doit être 'intro' ou 'outro'",
+          status: 400,
+        },
       })
     }
     if (typeof startTime !== 'number' || !Number.isFinite(startTime) || startTime < 0) {
       return response.badRequest({
-        error: { code: 'INVALID_START_TIME', message: 'start_time doit être un nombre >= 0', status: 400 },
+        error: {
+          code: 'INVALID_START_TIME',
+          message: 'start_time doit être un nombre >= 0',
+          status: 400,
+        },
       })
     }
-    if (typeof endTime !== 'number' || !Number.isFinite(endTime) || endTime <= 0 || endTime <= startTime) {
+    if (
+      typeof endTime !== 'number' ||
+      !Number.isFinite(endTime) ||
+      endTime <= 0 ||
+      endTime <= startTime
+    ) {
       return response.badRequest({
-        error: { code: 'INVALID_END_TIME', message: 'end_time doit être un nombre positif supérieur à start_time', status: 400 },
+        error: {
+          code: 'INVALID_END_TIME',
+          message: 'end_time doit être un nombre positif supérieur à start_time',
+          status: 400,
+        },
       })
     }
 
