@@ -1,6 +1,7 @@
 import type { HttpContext } from '@adonisjs/core/http'
 import ConvexRepository, { type ConvexProfile } from '#services/convex_repository'
 import TmdbService from '#services/tmdb_service'
+import { forgetHomeRowsCache } from '#services/home_cache_service'
 
 type WatchlistEntry = {
   tmdb_id: string
@@ -61,6 +62,7 @@ export default class WatchlistController {
         watchlist: deduped.slice(0, 200),
       },
     })
+    await forgetHomeRowsCache(profile._id)
 
     return response.ok({ data: await this.serializeWatchlist(updated) })
   }
@@ -93,8 +95,14 @@ export default class WatchlistController {
         watchlist: filtered,
       },
     })
+    await forgetHomeRowsCache(profile._id)
 
-    return response.ok({ data: await this.serializeWatchlist({ ...profile, preferences: { ...profile.preferences, watchlist: filtered } }) })
+    return response.ok({
+      data: await this.serializeWatchlist({
+        ...profile,
+        preferences: { ...profile.preferences, watchlist: filtered },
+      }),
+    })
   }
 
   private async resolveProfile(
