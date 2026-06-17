@@ -2,6 +2,7 @@ import type { HttpContext } from '@adonisjs/core/http'
 import RecommendationService from '#services/recommendation_service'
 import TmdbService from '#services/tmdb_service'
 import ConvexRepository from '#services/convex_repository'
+import { rememberHomeRows } from '#services/home_cache_service'
 
 export default class HomeController {
   private getMediaTitle(meta: { title?: string; name?: string }) {
@@ -19,92 +20,102 @@ export default class HomeController {
       })
     }
 
-    const tmdb = new TmdbService()
-    const recommendationService = new RecommendationService()
-    const rows = await recommendationService.generateHomeRows(profile._id)
-    const watchlistEntries = Array.isArray(profile.preferences?.watchlist)
-      ? profile.preferences.watchlist
-      : []
+    const allRows = await rememberHomeRows(profile._id, async () => {
+      const tmdb = new TmdbService()
+      const recommendationService = new RecommendationService()
+      const metadataCache = new Map<string, Promise<any>>()
+      const getMetadata = (mediaType: 'movie' | 'tv', tmdbId: string) => {
+        const key = `${mediaType}:${tmdbId}`
+        const existing = metadataCache.get(key)
+        if (existing) return existing
+        const promise =
+          mediaType === 'tv' ? tmdb.getTvShow(Number(tmdbId)) : tmdb.getMovie(Number(tmdbId))
+        metadataCache.set(key, promise)
+        return promise
+      }
 
-    const continueWatchingRaw = await repo.getActiveWatchHistory(profile._id)
+      const [rows, continueWatchingRaw] = await Promise.all([
+        recommendationService.generateHomeRows(profile._id),
+        repo.getActiveWatchHistory(profile._id),
+      ])
+      const watchlistEntries = Array.isArray(profile.preferences?.watchlist)
+        ? profile.preferences.watchlist
+        : []
 
-    const seenWorks = new Set<string>()
-    const continueWatching = continueWatchingRaw
-      .filter((h) => {
-        const workKey = `${h.mediaType}:${h.tmdbId}`
-        if (seenWorks.has(workKey)) return false
-        seenWorks.add(workKey)
-        return true
-      })
-      .slice(0, 20)
+      const seenWorks = new Set<string>()
+      const continueWatching = continueWatchingRaw
+        .filter((h) => {
+          const workKey = `${h.mediaType}:${h.tmdbId}`
+          if (seenWorks.has(workKey)) return false
+          seenWorks.add(workKey)
+          return true
+        })
+        .slice(0, 20)
 
-    const enrichedContinue = await Promise.all(
-      continueWatching.map(async (h) => {
-        try {
-          let meta: any
-          if (h.mediaType === 'movie') {
-            meta = await tmdb.getMovie(Number(h.tmdbId))
-          } else {
-            meta = await tmdb.getTvShow(Number(h.tmdbId))
+      const enrichedContinue = await Promise.all(
+        continueWatching.map(async (h) => {
+          try {
+            const meta = await getMetadata(h.mediaType, h.tmdbId)
+            return {
+              tmdb_id: h.tmdbId,
+              media_type: h.mediaType,
+              title: meta.title ?? meta.name,
+              poster_url: meta.poster_url,
+              backdrop_url: meta.backdrop_url,
+              season_num: h.seasonNum,
+              episode_num: h.episodeNum,
+              current_time: h.currentTime,
+              total_duration: h.totalDuration,
+              progress: h.totalDuration > 0 ? h.currentTime / h.totalDuration : 0,
+            }
+          } catch {
+            return null
           }
-          return {
-            tmdb_id: h.tmdbId,
-            media_type: h.mediaType,
-            title: meta.title ?? meta.name,
-            poster_url: meta.poster_url,
-            backdrop_url: meta.backdrop_url,
-            season_num: h.seasonNum,
-            episode_num: h.episodeNum,
-            current_time: h.currentTime,
-            total_duration: h.totalDuration,
-            progress: h.totalDuration > 0 ? h.currentTime / h.totalDuration : 0,
+        })
+      )
+
+      const enrichedWatchlist = await Promise.all(
+        watchlistEntries.slice(0, 20).map(async (entry: any) => {
+          try {
+            const mediaType = entry?.media_type === 'tv' ? 'tv' : 'movie'
+            const tmdbId = String(entry?.tmdb_id ?? '').trim()
+            if (!tmdbId) return null
+
+            const meta = await getMetadata(mediaType, tmdbId)
+
+            return {
+              tmdb_id: tmdbId,
+              media_type: mediaType,
+              title: this.getMediaTitle(meta),
+              poster_url: meta.poster_url,
+              backdrop_url: meta.backdrop_url,
+              current_time: null,
+              total_duration: null,
+              progress: null,
+            }
+          } catch {
+            return null
           }
-        } catch {
-          return null
-        }
-      })
-    )
+        })
+      )
 
-    const enrichedWatchlist = await Promise.all(
-      watchlistEntries.slice(0, 20).map(async (entry: any) => {
-        try {
-          const mediaType = entry?.media_type === 'tv' ? 'tv' : 'movie'
-          const tmdbId = String(entry?.tmdb_id ?? '').trim()
-          if (!tmdbId) return null
+      const watchlistItems = enrichedWatchlist.filter(
+        (item): item is NonNullable<typeof item> => item !== null
+      )
+      const continueItems = enrichedContinue.filter(
+        (item): item is NonNullable<typeof item> => item !== null
+      )
 
-          const meta =
-            mediaType === 'tv'
-              ? await tmdb.getTvShow(Number(tmdbId))
-              : await tmdb.getMovie(Number(tmdbId))
-
-          return {
-            tmdb_id: tmdbId,
-            media_type: mediaType,
-            title: this.getMediaTitle(meta),
-            poster_url: meta.poster_url,
-            backdrop_url: meta.backdrop_url,
-            current_time: null,
-            total_duration: null,
-            progress: null,
-          }
-        } catch {
-          return null
-        }
-      })
-    )
-
-    const watchlistItems = enrichedWatchlist.filter((item): item is NonNullable<typeof item> => item !== null)
-    const continueItems = enrichedContinue.filter((item): item is NonNullable<typeof item> => item !== null)
-
-    const allRows = [
-      ...(continueItems.length > 0
-        ? [{ type: 'continue_watching', title: 'Continuer de regarder', items: continueItems }]
-        : []),
-      ...(watchlistItems.length > 0
-        ? [{ type: 'watchlist', title: 'Ma liste', items: watchlistItems }]
-        : []),
-      ...rows,
-    ]
+      return [
+        ...(continueItems.length > 0
+          ? [{ type: 'continue_watching', title: 'Continuer de regarder', items: continueItems }]
+          : []),
+        ...(watchlistItems.length > 0
+          ? [{ type: 'watchlist', title: 'Ma liste', items: watchlistItems }]
+          : []),
+        ...rows,
+      ]
+    })
 
     return response.ok({ data: { rows: allRows } })
   }

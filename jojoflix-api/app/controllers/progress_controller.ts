@@ -1,6 +1,7 @@
 import type { HttpContext } from '@adonisjs/core/http'
-import ConvexRepository from '#services/convex_repository'
+import ConvexRepository, { type ConvexWatchHistory } from '#services/convex_repository'
 import RecommendationService from '#services/recommendation_service'
+import { forgetHomeRowsCache } from '#services/home_cache_service'
 import vine from '@vinejs/vine'
 
 const syncValidator = vine.create({
@@ -27,11 +28,11 @@ export default class ProgressController {
     const profile = await repo.getProfileOfUser(profileId, user.id)
     if (!profile) return response.ok({ data: null })
 
-    const history = await repo.getWatchHistory(
-      profile._id,
-      tmdbId,
-      mediaType as 'movie' | 'tv'
-    )
+    const normalizedMediaType = mediaType as 'movie' | 'tv'
+    const history =
+      normalizedMediaType === 'tv'
+        ? this.latestActiveHistory(await repo.getWatchHistoriesByTmdb(profile._id, tmdbId, 'tv'))
+        : await repo.getWatchHistory(profile._id, tmdbId, 'movie')
 
     if (!history) return response.ok({ data: null })
 
@@ -87,12 +88,11 @@ export default class ProgressController {
       totalDuration: data.total_duration,
       isFinished,
     })
+    await forgetHomeRowsCache(profile._id)
 
     if (isFinished && !wasFinished) {
       const recommendation = new RecommendationService()
-      recommendation
-        .onContentFinished(profile._id, data.tmdb_id, data.media_type)
-        .catch(() => {})
+      recommendation.onContentFinished(profile._id, data.tmdb_id, data.media_type).catch(() => {})
     }
 
     return response.ok({
@@ -102,5 +102,13 @@ export default class ProgressController {
         current_time: data.current_time,
       },
     })
+  }
+
+  private latestActiveHistory(histories: ConvexWatchHistory[]): ConvexWatchHistory | null {
+    return (
+      histories
+        .filter((history) => !history.isFinished && history.currentTime > 0)
+        .sort((a, b) => b.updatedAtMs - a.updatedAtMs)[0] ?? null
+    )
   }
 }
