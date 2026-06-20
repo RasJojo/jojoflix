@@ -20,6 +20,7 @@ import MediaController from '#controllers/media_controller'
 import PeopleController from '#controllers/people_controller'
 import WatchlistController from '#controllers/watchlist_controller'
 import DownloadController from '#controllers/download_controller'
+import HealthController from '#controllers/health_controller'
 
 router.get('/', () => {
   return { status: 'ok', service: 'jojoflix-api' }
@@ -28,6 +29,7 @@ router.get('/', () => {
 router.get('/health', () => {
   return { status: 'ok', service: 'jojoflix-api' }
 })
+router.get('/health/deep', [HealthController, 'deep'])
 
 router
   .group(() => {
