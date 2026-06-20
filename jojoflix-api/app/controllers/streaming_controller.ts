@@ -138,21 +138,37 @@ export default class StreamingController {
 
     try {
       const source = await this.resolveSource(tmdbId, 'tv', sourceKey, undefined, season, episode)
-      let directReady = false
-      try {
-        await this.resolveDirectUrl(source, 'tv', season, episode, {
-          timeoutMs: 25_000,
-          maxRdAttempts: 12,
-        })
-        directReady = true
-      } catch (error) {
-        console.warn(
-          `[stream:prewarm] direct-url failed tmdb=${tmdbId} s=${season} e=${episode} key=${source.key} error=${error instanceof Error ? error.message : String(error)}`
-        )
+      const candidates = await this.getSourceFallbackCandidates(
+        tmdbId,
+        'tv',
+        source,
+        season,
+        episode
+      )
+
+      for (const candidate of candidates.slice(0, 5)) {
+        try {
+          await this.resolveDirectUrl(candidate, 'tv', season, episode, {
+            timeoutMs: 8_000,
+            maxRdAttempts: 5,
+          })
+          if (candidate.key !== source.key) {
+            console.info(
+              `[stream:prewarm] switched-source tmdb=${tmdbId} s=${season} e=${episode} from=${source.key} to=${candidate.key}`
+            )
+          }
+          return response.ok({
+            data: { warmed: true, source_ready: true, source_key: candidate.key },
+          })
+        } catch (error) {
+          console.warn(
+            `[stream:prewarm] direct-url failed tmdb=${tmdbId} s=${season} e=${episode} key=${candidate.key} error=${error instanceof Error ? error.message : String(error)}`
+          )
+          if (!this.isSourceAvailabilityError(error)) throw error
+        }
       }
-      return response.ok({
-        data: { warmed: directReady, source_ready: true, source_key: source.key },
-      })
+
+      return response.ok({ data: { warmed: false, source_ready: false } })
     } catch (error) {
       console.warn(
         `[stream:prewarm] source failed tmdb=${tmdbId} s=${season} e=${episode} error=${error instanceof Error ? error.message : String(error)}`
@@ -461,17 +477,17 @@ export default class StreamingController {
       pushUnique(source)
     }
 
-    // Promouvoir les sources [RD+] (déjà dans la bibliothèque RD de l'utilisateur) juste
-    // après la source préférée, avant les autres sources non-vérifiées. Sans ce tri,
-    // les sources FRENCH non-disponibles (score élevé) remplissent les 8 premiers slots
-    // et on n'atteint jamais les sources qui marchent réellement.
+    // Promouvoir les sources [RD+] puis les providers non-Torrentio juste après
+    // la source préférée. Quand Torrentio renvoie 403/not cached, essayer 7 autres
+    // entrées Torrentio avant MediaFusion rend le lancement trop lent et fragile.
     const preferred = ordered[0]
     const rest = ordered.slice(1)
     const isRdPlus = (s: TorrentSource) => (s.raw_name ?? '').includes('[RD+]')
     const rdPlusSources = rest.filter(isRdPlus)
-    const otherSources = rest.filter((s) => !isRdPlus(s))
+    const nonTorrentioSources = rest.filter((s) => !isRdPlus(s) && s.provider !== 'torrentio')
+    const torrentioSources = rest.filter((s) => !isRdPlus(s) && s.provider === 'torrentio')
 
-    return [preferred, ...rdPlusSources, ...otherSources]
+    return [preferred, ...rdPlusSources, ...nonTorrentioSources, ...torrentioSources]
   }
 
   private async resolveDirectUrl(
@@ -629,17 +645,6 @@ export default class StreamingController {
   ): Promise<boolean> {
     const requestedStreamId = this.normalizeStreamId(request.input('stream_id'))
     const streamId = requestedStreamId ?? crypto.randomUUID()
-    await this.registry.register(userId, streamId, directUrl, {
-      profile_id: this.normalizeProfileId(request.input('profile_id')),
-      tmdb_id: metadata.tmdbId,
-      media_type: metadata.mediaType,
-      season: metadata.season ?? null,
-      episode: metadata.episode ?? null,
-      source_key: selectedSourceKey,
-      source_provider: metadata.sourceProvider ?? null,
-      direct_url_host: this.directUrlHost(directUrl),
-      user_agent: request.header('user-agent') ?? null,
-    })
 
     // Stream proxy (Range + backpressure) : on ne renvoie jamais l'URL RD au client.
     const rangeHeader = request.header('range')
@@ -675,101 +680,125 @@ export default class StreamingController {
     try {
       const started = await new Promise<boolean>((resolve, reject) => {
         upstream.once('response', (upstreamResponse) => {
-          const statusCode = upstreamResponse.statusCode ?? 500
-          const finalUrl: string = (upstreamResponse as any).url ?? directUrl
-          console.info(
-            `[stream:upstream] status=${statusCode} finalUrl=${finalUrl.substring(0, 100)}`
-          )
-
-          // resolve(false) toujours EN PREMIER pour éviter une race condition :
-          // upstream.destroy() peut émettre 'error' de façon synchrone, ce qui appellerait
-          // reject() avant resolve(), forçant le catch à envoyer un 502 au lieu de continuer.
-          if (statusCode >= 400) {
-            resolve(false)
-            if (!upstream.destroyed) upstream.destroy()
-            return
-          }
-
-          // Rejeter les réponses non-vidéo : JSON, HTML, XML → mpv voit des "streams filtrés"
-          // car il tente de les parser comme container vidéo et échoue à sélectionner des pistes.
-          const contentType = (upstreamResponse.headers['content-type'] ?? '').toLowerCase()
-          const isVideoLike =
-            contentType.startsWith('video/') ||
-            contentType.startsWith('audio/') ||
-            contentType.includes('octet-stream') ||
-            contentType.includes('mpeg') ||
-            contentType === '' // Certains CDN n'envoient pas de Content-Type, on laisse passer
-          if (
-            !isVideoLike &&
-            (contentType.includes('json') ||
-              contentType.includes('html') ||
-              contentType.includes('xml') ||
-              contentType.includes('text/plain'))
-          ) {
-            console.warn(
-              `[stream:upstream] non-video content-type="${contentType}" → reject source`
+          void (async () => {
+            const statusCode = upstreamResponse.statusCode ?? 500
+            const finalUrl: string = (upstreamResponse as any).url ?? directUrl
+            console.info(
+              `[stream:upstream] status=${statusCode} finalUrl=${finalUrl.substring(0, 100)}`
             )
-            resolve(false)
-            if (!upstream.destroyed) upstream.destroy()
-            return
-          }
 
-          // Détecter les vidéos d'erreur internes des providers :
-          // MediaFusion sert mediafusion.elfhosted.com/static/exceptions/torrent_not_downloaded.mp4
-          // (status 206, content-type video/mp4, mais c'est une vidéo "torrent pas téléchargé")
-          // On détecte quand la redirection finale reste sur le même domaine que l'URL d'entrée.
-          try {
-            const finalHost = new URL(finalUrl).hostname
-            const inputHost = new URL(directUrl).hostname
-            if (finalHost === inputHost && finalUrl !== directUrl) {
+            // resolve(false) toujours EN PREMIER pour éviter une race condition :
+            // upstream.destroy() peut émettre 'error' de façon synchrone, ce qui appellerait
+            // reject() avant resolve(), forçant le catch à envoyer un 502 au lieu de continuer.
+            if (statusCode >= 400) {
+              resolve(false)
+              if (!upstream.destroyed) upstream.destroy()
+              return
+            }
+
+            // Rejeter les réponses non-vidéo : JSON, HTML, XML → mpv voit des "streams filtrés"
+            // car il tente de les parser comme container vidéo et échoue à sélectionner des pistes.
+            const contentType = (upstreamResponse.headers['content-type'] ?? '').toLowerCase()
+            const isVideoLike =
+              contentType.startsWith('video/') ||
+              contentType.startsWith('audio/') ||
+              contentType.includes('octet-stream') ||
+              contentType.includes('mpeg') ||
+              contentType === '' // Certains CDN n'envoient pas de Content-Type, on laisse passer
+            if (
+              !isVideoLike &&
+              (contentType.includes('json') ||
+                contentType.includes('html') ||
+                contentType.includes('xml') ||
+                contentType.includes('text/plain'))
+            ) {
               console.warn(
-                `[stream:upstream] internal error video detected host=${finalHost} path=${new URL(finalUrl).pathname}`
+                `[stream:upstream] non-video content-type="${contentType}" → reject source`
               )
               resolve(false)
               if (!upstream.destroyed) upstream.destroy()
               return
             }
-          } catch {
-            // URL invalide : on continue le streaming normalement
-          }
 
-          response.response.statusCode = statusCode
-          response.header('x-jojoflix-stream-id', streamId)
-          response.header('x-jojoflix-requested-source-key', requestedSourceKey)
-          response.header('x-jojoflix-selected-source-key', selectedSourceKey)
-          response.header(
-            'x-jojoflix-source-fallback',
-            // BUG #14 fix: use strict equality to avoid type coercion on source key comparison.
-            requestedSourceKey === selectedSourceKey ? '0' : '1'
-          )
-
-          const headersToForward = [
-            'content-type',
-            'content-length',
-            'content-range',
-            'accept-ranges',
-            'etag',
-            'last-modified',
-            'cache-control',
-          ]
-
-          for (const name of headersToForward) {
-            const value = upstreamResponse.headers[name]
-            if (value !== undefined) {
-              response.header(name, String(value))
+            // Détecter les vidéos d'erreur internes des providers :
+            // MediaFusion sert mediafusion.elfhosted.com/static/exceptions/torrent_not_downloaded.mp4
+            // (status 206, content-type video/mp4, mais c'est une vidéo "torrent pas téléchargé")
+            // On détecte quand la redirection finale reste sur le même domaine que l'URL d'entrée.
+            try {
+              const finalHost = new URL(finalUrl).hostname
+              const inputHost = new URL(directUrl).hostname
+              if (finalHost === inputHost && finalUrl !== directUrl) {
+                console.warn(
+                  `[stream:upstream] internal error video detected host=${finalHost} path=${new URL(finalUrl).pathname}`
+                )
+                resolve(false)
+                if (!upstream.destroyed) upstream.destroy()
+                return
+              }
+            } catch {
+              // URL invalide : on continue le streaming normalement
             }
-          }
 
-          if (!response.response.getHeader('accept-ranges')) {
-            response.header('accept-ranges', 'bytes')
-          }
+            const wrongEpisode = this.detectWrongEpisodeFinalUrl(finalUrl, metadata)
+            if (wrongEpisode) {
+              console.warn(
+                `[stream:upstream] wrong episode detected expected=s${metadata.season}e${metadata.episode} got=s${wrongEpisode.season ?? '?'}e${wrongEpisode.episode} pattern=${wrongEpisode.pattern}`
+              )
+              resolve(false)
+              if (!upstream.destroyed) upstream.destroy()
+              return
+            }
 
-          pipeline(upstream, response.response)
-            .then(() => {
-              response.response.removeListener('close', cleanupListener)
-              resolve(true)
+            await this.registry.register(userId, streamId, directUrl, {
+              profile_id: this.normalizeProfileId(request.input('profile_id')),
+              tmdb_id: metadata.tmdbId,
+              media_type: metadata.mediaType,
+              season: metadata.season ?? null,
+              episode: metadata.episode ?? null,
+              source_key: selectedSourceKey,
+              source_provider: metadata.sourceProvider ?? null,
+              direct_url_host: this.directUrlHost(finalUrl),
+              user_agent: request.header('user-agent') ?? null,
             })
-            .catch(reject)
+
+            response.response.statusCode = statusCode
+            response.header('x-jojoflix-stream-id', streamId)
+            response.header('x-jojoflix-requested-source-key', requestedSourceKey)
+            response.header('x-jojoflix-selected-source-key', selectedSourceKey)
+            response.header(
+              'x-jojoflix-source-fallback',
+              // BUG #14 fix: use strict equality to avoid type coercion on source key comparison.
+              requestedSourceKey === selectedSourceKey ? '0' : '1'
+            )
+
+            const headersToForward = [
+              'content-type',
+              'content-length',
+              'content-range',
+              'accept-ranges',
+              'etag',
+              'last-modified',
+              'cache-control',
+            ]
+
+            for (const name of headersToForward) {
+              const value = upstreamResponse.headers[name]
+              if (value !== undefined) {
+                response.header(name, String(value))
+              }
+            }
+
+            if (!response.response.getHeader('accept-ranges')) {
+              response.header('accept-ranges', 'bytes')
+            }
+
+            pipeline(upstream, response.response)
+              .then(() => {
+                response.response.removeListener('close', cleanupListener)
+                resolve(true)
+              })
+              .catch(reject)
+          })().catch(reject)
         })
 
         upstream.once('error', reject)
@@ -816,5 +845,110 @@ export default class StreamingController {
     } catch {
       return null
     }
+  }
+
+  private detectWrongEpisodeFinalUrl(
+    finalUrl: string,
+    metadata: { mediaType: 'movie' | 'tv'; season?: number; episode?: number }
+  ): { season: number | null; episode: number; pattern: string } | null {
+    if (metadata.mediaType !== 'tv' || metadata.season == null || metadata.episode == null) {
+      return null
+    }
+
+    const probeText = this.episodeProbeText(finalUrl)
+    const markers = this.extractEpisodeMarkers(probeText)
+    if (markers.length === 0) return null
+
+    const seasonMarkers = markers.filter((marker) => marker.season != null)
+    for (const marker of seasonMarkers) {
+      if (this.markerMatchesRequestedEpisode(marker, metadata.season, metadata.episode)) {
+        return null
+      }
+    }
+
+    if (seasonMarkers.length > 0) {
+      return seasonMarkers[0]
+    }
+
+    const episodeMarker = markers[0]
+    if (this.markerMatchesRequestedEpisode(episodeMarker, metadata.season, metadata.episode)) {
+      return null
+    }
+    return episodeMarker
+  }
+
+  private episodeProbeText(url: string): string {
+    try {
+      const parsed = new URL(url)
+      return decodeURIComponent(parsed.pathname)
+    } catch {
+      try {
+        return decodeURIComponent(url)
+      } catch {
+        return url
+      }
+    }
+  }
+
+  private extractEpisodeMarkers(text: string): Array<{
+    season: number | null
+    episode: number
+    endEpisode: number | null
+    pattern: string
+  }> {
+    const markers: Array<{
+      season: number | null
+      episode: number
+      endEpisode: number | null
+      pattern: string
+    }> = []
+
+    const seasonEpisode =
+      /\bS0*(\d{1,2})[\s._-]*E0*(\d{1,3})(?:\s*(?:-|–|~|to)\s*(?:S0*\d{1,2}[\s._-]*)?E?0*(\d{1,3}))?/gi
+    for (const match of text.matchAll(seasonEpisode)) {
+      markers.push({
+        season: Number(match[1]),
+        episode: Number(match[2]),
+        endEpisode: match[3] ? Number(match[3]) : null,
+        pattern: match[0],
+      })
+    }
+
+    const xPattern = /\b0*(\d{1,2})x0*(\d{1,3})(?:\s*(?:-|–|~|to)\s*0*(\d{1,3}))?\b/gi
+    for (const match of text.matchAll(xPattern)) {
+      markers.push({
+        season: Number(match[1]),
+        episode: Number(match[2]),
+        endEpisode: match[3] ? Number(match[3]) : null,
+        pattern: match[0],
+      })
+    }
+
+    if (markers.length > 0) return markers
+
+    const episodeOnly =
+      /(?:^|[^\w])(?:ep|episode)[\s._-]*0*(\d{1,3})(?:\s*(?:-|–|~|to)\s*(?:ep|episode)?[\s._-]*0*(\d{1,3}))?(?=$|[^\w])/gi
+    for (const match of text.matchAll(episodeOnly)) {
+      markers.push({
+        season: null,
+        episode: Number(match[1]),
+        endEpisode: match[2] ? Number(match[2]) : null,
+        pattern: match[0].trim(),
+      })
+    }
+
+    return markers
+  }
+
+  private markerMatchesRequestedEpisode(
+    marker: { season: number | null; episode: number; endEpisode: number | null },
+    season: number,
+    episode: number
+  ): boolean {
+    if (marker.season != null && marker.season !== season) return false
+    if (marker.endEpisode != null) {
+      return episode >= marker.episode && episode <= marker.endEpisode
+    }
+    return marker.episode === episode
   }
 }

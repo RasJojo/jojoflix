@@ -1,0 +1,28 @@
+FROM node:24-alpine AS builder
+
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --legacy-peer-deps
+
+COPY ace.js adonisrc.ts tsconfig.json eslint.config.js ./
+COPY .adonisjs ./.adonisjs
+COPY app ./app
+COPY bin ./bin
+COPY config ./config
+COPY database ./database
+COPY providers ./providers
+COPY start ./start
+COPY tests ./tests
+RUN npm run build
+
+FROM node:24-alpine AS production
+
+RUN apk add --no-cache ffmpeg
+
+WORKDIR /app
+COPY --from=builder /app/build ./
+COPY package*.json ./
+RUN npm ci --legacy-peer-deps
+
+EXPOSE 3333
+CMD ["sh", "-c", "node bin/console.js migration:run --force && node bin/server.js"]
