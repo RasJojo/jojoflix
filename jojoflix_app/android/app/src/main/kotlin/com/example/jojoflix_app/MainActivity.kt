@@ -1,4 +1,4 @@
-package com.example.jojoflix_app
+package com.rasjojo.jojoflix
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -31,11 +31,11 @@ class MainActivity : FlutterActivity(), MethodChannel.MethodCallHandler {
         private const val NOTIFICATION_CHANNEL_NAME = "Lecture JojoFlix"
         private const val NOTIFICATION_ID = 42042
 
-        const val ACTION_PLAY = "com.example.jojoflix_app.action.PLAY"
-        const val ACTION_PAUSE = "com.example.jojoflix_app.action.PAUSE"
-        const val ACTION_TOGGLE = "com.example.jojoflix_app.action.TOGGLE"
-        const val ACTION_REWIND = "com.example.jojoflix_app.action.REWIND"
-        const val ACTION_FAST_FORWARD = "com.example.jojoflix_app.action.FAST_FORWARD"
+        const val ACTION_PLAY = "com.rasjojo.jojoflix.action.PLAY"
+        const val ACTION_PAUSE = "com.rasjojo.jojoflix.action.PAUSE"
+        const val ACTION_TOGGLE = "com.rasjojo.jojoflix.action.TOGGLE"
+        const val ACTION_REWIND = "com.rasjojo.jojoflix.action.REWIND"
+        const val ACTION_FAST_FORWARD = "com.rasjojo.jojoflix.action.FAST_FORWARD"
 
         private var activeInstance: MainActivity? = null
 
