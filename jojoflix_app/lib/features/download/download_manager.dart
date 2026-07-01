@@ -9,6 +9,19 @@ import '../../core/network/api_client.dart';
 import '../player/repository/subtitle_repository.dart';
 import 'download_repository.dart';
 
+/// Dedicated Dio instance for large file streaming.
+/// The shared ApiClient Dio has a 30s receiveTimeout which fires before the
+/// server finishes RD resolution (can take 60-70s). Using receiveTimeout=null
+/// disables the read deadline so the server can take as long as it needs.
+Dio _buildDownloadDio(String baseUrl) => Dio(
+      BaseOptions(
+        baseUrl: baseUrl,
+        connectTimeout: const Duration(seconds: 30),
+        sendTimeout: const Duration(seconds: 30),
+        receiveTimeout: null,
+      ),
+    );
+
 // ── Public helpers ────────────────────────────────────────────────────────────
 
 String downloadItemId({
@@ -182,11 +195,31 @@ class DownloadManagerState {
 
 final downloadManagerProvider =
     StateNotifierProvider<DownloadManagerNotifier, DownloadManagerState>((ref) {
+  final prefs = ref.watch(sharedPreferencesProvider);
+  final apiClient = ref.watch(apiClientProvider);
+  final downloadDio = _buildDownloadDio(apiClient.dio.options.baseUrl);
+  // Read auth token from SharedPreferences directly — same source as ApiClient.
+  downloadDio.interceptors.add(
+    InterceptorsWrapper(
+      onRequest: (options, handler) {
+        final token = prefs.getString('auth_token');
+        if (token != null && !isLegacyAuthToken(token)) {
+          options.headers['Authorization'] = 'Bearer $token';
+        }
+        final profileId = prefs.getString('active_profile_id');
+        if (profileId != null && !isLegacyProfileId(profileId)) {
+          options.headers['X-Profile-Id'] = profileId;
+        }
+        handler.next(options);
+      },
+    ),
+  );
+  ref.onDispose(downloadDio.close);
   return DownloadManagerNotifier(
-    prefs: ref.watch(sharedPreferencesProvider),
+    prefs: prefs,
     downloadRepo: ref.watch(downloadRepositoryProvider),
     subtitleRepo: ref.watch(subtitleRepositoryProvider),
-    dio: ref.watch(apiClientProvider).dio,
+    dio: downloadDio,
   );
 });
 
@@ -289,10 +322,6 @@ class DownloadManagerNotifier extends StateNotifier<DownloadManagerState> {
         proxyUrl,
         targetVideoPath,
         cancelToken: cancelToken,
-        options: Options(
-          sendTimeout: const Duration(seconds: 30),
-          receiveTimeout: const Duration(hours: 8),
-        ),
         onReceiveProgress: (received, total) {
           if (total > 0 && !cancelToken.isCancelled) {
             _setTask(DownloadTask(
@@ -375,11 +404,11 @@ class DownloadManagerNotifier extends StateNotifier<DownloadManagerState> {
         _setTask(DownloadTask(
           id: id,
           status: DownloadTaskStatus.error,
-          error: 'Téléchargement échoué',
+          error: _describeDioError(e),
           label: episodeLabel ?? title,
         ));
       }
-    } catch (_) {
+    } catch (e) {
       if (videoPath != null) {
         await _deleteFileIfExists(videoPath);
       }
@@ -387,7 +416,7 @@ class DownloadManagerNotifier extends StateNotifier<DownloadManagerState> {
       _setTask(DownloadTask(
         id: id,
         status: DownloadTaskStatus.error,
-        error: 'Téléchargement échoué',
+        error: 'Erreur: $e',
         label: episodeLabel ?? title,
       ));
     }
@@ -495,6 +524,30 @@ class DownloadManagerNotifier extends StateNotifier<DownloadManagerState> {
     final newTasks = Map<String, DownloadTask>.from(state.activeTasks)
       ..remove(id);
     state = state.copyWith(activeTasks: newTasks);
+  }
+
+  String _describeDioError(DioException e) {
+    final status = e.response?.statusCode;
+    if (status == 404) return 'Aucune source disponible';
+    if (status != null) {
+      final data = e.response?.data;
+      String? serverMsg;
+      if (data is Map) {
+        final errMap = data['error'];
+        if (errMap is Map) serverMsg = errMap['message'] as String?;
+      }
+      return serverMsg != null
+          ? 'Erreur serveur : $serverMsg'
+          : 'Erreur serveur ($status)';
+    }
+    if (e.type == DioExceptionType.connectionTimeout ||
+        e.type == DioExceptionType.receiveTimeout) {
+      return 'Délai dépassé — réessaie';
+    }
+    if (e.type == DioExceptionType.connectionError) {
+      return 'Connexion impossible';
+    }
+    return 'Téléchargement échoué';
   }
 
   void _setTask(DownloadTask task) {
