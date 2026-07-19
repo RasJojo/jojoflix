@@ -37,10 +37,17 @@ if (!DB_PATH) {
   process.exit(1)
 }
 
-const CONVEX_URL = 'https://convex.jojoserv.com'
-const ADMIN_KEY =
-  '[REMOVED_CONVEX_ADMIN_KEY]'
+const CONVEX_URL = process.env.CONVEX_URL
+if (!CONVEX_URL) {
+  console.error('CONVEX_URL manquant')
+  process.exit(1)
+}
 
+const ADMIN_KEY = process.env.CONVEX_ADMIN_KEY
+if (!ADMIN_KEY) {
+  console.error('CONVEX_ADMIN_KEY manquant')
+  process.exit(1)
+}
 const DRY_RUN = process.argv.includes('--dry-run')
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -53,7 +60,7 @@ async function callMutation(path, args) {
   const res = await fetch(`${CONVEX_URL}/api/mutation`, {
     method: 'POST',
     headers: {
-      Authorization: `Convex ${ADMIN_KEY}`,
+      'Authorization': `Convex ${ADMIN_KEY}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ path, args, format: 'json' }),
@@ -69,7 +76,7 @@ async function callQuery(path, args) {
   const res = await fetch(`${CONVEX_URL}/api/query`, {
     method: 'POST',
     headers: {
-      Authorization: `Convex ${ADMIN_KEY}`,
+      'Authorization': `Convex ${ADMIN_KEY}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ path, args, format: 'json' }),
@@ -184,7 +191,11 @@ async function migrateProfiles(db, userIdMap) {
 
     let preferences = row.preferences ?? {}
     if (typeof preferences === 'string') {
-      try { preferences = JSON.parse(preferences) } catch { preferences = {} }
+      try {
+        preferences = JSON.parse(preferences)
+      } catch {
+        preferences = {}
+      }
     }
 
     const result = await callMutation('jojoflix:createProfile', {
@@ -218,7 +229,10 @@ async function migrateWatchHistories(db, profileIdMap) {
     progress('WatchHistories', i + 1, rows.length)
 
     const profileId = profileIdMap.get(row.profile_id)
-    if (!profileId) { skipped++; continue }
+    if (!profileId) {
+      skipped++
+      continue
+    }
 
     await callMutation('jojoflix:upsertWatchHistory', {
       profileId,
@@ -249,7 +263,10 @@ async function migrateProfileInterests(db, profileIdMap) {
     progress('Interests', i + 1, rows.length)
 
     const profileId = profileIdMap.get(row.profile_id)
-    if (!profileId) { skipped++; continue }
+    if (!profileId) {
+      skipped++
+      continue
+    }
 
     await callMutation('jojoflix:upsertInterest', {
       profileId,
@@ -289,7 +306,9 @@ async function migrateMediaMarkers(db) {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
-  console.log(`\n🚀 Migration PostgreSQL → Better Auth + Convex (jojoflix)${DRY_RUN ? ' [DRY-RUN]' : ''}`)
+  console.log(
+    `\n🚀 Migration PostgreSQL → Better Auth + Convex (jojoflix)${DRY_RUN ? ' [DRY-RUN]' : ''}`
+  )
   console.log(`   PG:     ${DATABASE_URL.replace(/:([^@]+)@/, ':***@')}`)
   console.log(`   SQLite: ${DB_PATH}`)
   console.log(`   Convex: ${CONVEX_URL}\n`)
@@ -310,7 +329,7 @@ async function main() {
 
     console.log('\n✅ Migration terminée !\n')
     if (DRY_RUN) {
-      console.log('ℹ️  Mode dry-run : rien n\'a été écrit dans Convex ni dans SQLite.')
+      console.log("ℹ️  Mode dry-run : rien n'a été écrit dans Convex ni dans SQLite.")
       console.log('   Relance sans --dry-run pour migrer pour de vrai.\n')
     }
   } catch (err) {
